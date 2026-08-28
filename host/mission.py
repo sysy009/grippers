@@ -35,7 +35,8 @@ sys.path.insert(0, str(Path(__file__).parent / "aruco"))
 import config as cfg
 from localizer import Pose, box_pose
 from navigator import GridPathPlanner, DriveCommand, DriveMode, DriveSequencer
-from vehicle_link import BACK_OFF, CREEP_IN, RE_AIM, MissionCommand, VehicleLink
+from vehicle_link import (BACK_OFF, CREEP_IN, RE_AIM, SHIFT, MissionCommand,
+                          VehicleLink)
 
 XY = tuple[float, float]
 PieceMap = dict[str, list[XY]]
@@ -50,6 +51,8 @@ class State(Enum):
     FACE_BOX = auto()          # 상자 앞 도착 후 정해진 방향(BOX_FACE_YAW_DEG)으로 제자리 회전
     NUDGE_BOX = auto()         # 그 방향으로 BOX_NUDGE_M 만큼만 더 전진하고 정지
     PLACE = auto()             # 차량이 SmolVLA 로 내려놓는 동안 대기
+    INSERT_ALIGN = auto()      # Pi 가 "투하 조건이 안 맞는다"(INSERT_BLOCKED) 해서 재정렬 중
+    HALTED = auto()            # 사람이 개입해야 한다. 물체를 든 채 갈 곳이 없을 때
     DONE = auto()
 
 
@@ -142,6 +145,11 @@ class MissionFSM:
         self.ready_to_advance = False
         self._advance_requested = False
         self._back_requested = False
+        self._insert_align = None
+        self._insert_align_from = None
+        self._insert_align_tries = 0
+        self._insert_tries = 0
+        self.halt_reason = None
         self._path_planner = GridPathPlanner()
         self._drive = DriveSequencer()
         self.reset()
@@ -170,6 +178,10 @@ class MissionFSM:
             State.FACE_BOX: State.CARRY_TO_DEST,
             State.NUDGE_BOX: State.FACE_BOX,
             State.PLACE: State.NUDGE_BOX,
+            State.INSERT_ALIGN: State.PLACE,
+            # HALTED 에서 뒤로가기는 **사람이 복구했다는 뜻**이다. 다시 세우는
+            # 것부터 하도록 FACE_BOX 로 돌린다.
+            State.HALTED: State.FACE_BOX,
         }.get(self.state)
         if prev is None:
             return   # SEARCH_TARGET 은 맨 앞이라 더 되돌아갈 데가 없다
@@ -236,6 +248,17 @@ class MissionFSM:
         self._align = None
         self._align_from: Optional[tuple[float, float, float]] = None
         self._align_tries = 0
+        # INSERT_ALIGN 용. 위 셋과 같은 역할이되 바구니 쪽이다. **따로 두는
+        # 이유**는 GRASP 보정과 INSERT 보정이 서로 새는 것을 막기 위해서다
+        # (vehicle_link 의 슬롯 분리와 같은 이유).
+        self._insert_align = None
+        self._insert_align_from: Optional[tuple[float, float, float]] = None
+        self._insert_align_tries = 0
+        self._insert_tries = 0        # INSERT_FAILED 재시도 횟수
+
+        # HALTED 로 멈춘 이유. 화면과 콘솔에 그대로 보여준다.
+        self.halt_reason: Optional[str] = None
+
         # 재정렬을 다 쓰고도 못 집은 기물 좌표. SEARCH_TARGET 후보에서 뺀다.
         self.skipped: list[XY] = []
 
@@ -274,6 +297,10 @@ class MissionFSM:
         print(f"[mission] {self.target_label} 보류: {why}")
         self._align = None
         self._align_from = None
+        self._insert_align = None
+        self._insert_align_from = None
+        self._insert_align_tries = 0
+        self._insert_tries = 0
         self.target_label = None
         self._target_xy = None
         self.dest_xy = None
@@ -282,6 +309,25 @@ class MissionFSM:
         self._path_planner.reset()
         self._drive.reset()
         self.state = State.SEARCH_TARGET
+
+    def _halt(self, why: str) -> None:
+        """물체를 든 채 갈 곳이 없을 때 멈춘다. **사람이 개입해야 풀린다.**
+
+        `_skip_target` 과 나누는 기준은 **손이 비었는가** 하나다. 손이 비었으면
+        다음 기물로 가면 되지만, 물체를 든 채로는 SEARCH_TARGET 으로 돌아가도
+        새 기물을 집을 수 없다 — 그리퍼가 차 있으니 Pi 가 GRASP 를 거부한다.
+        그런 상태로 계속 도는 것보다 멈춰서 보이는 쪽이 낫다.
+
+        수동 모드에서 Prev 를 누르면 FACE_BOX 로 돌아가 다시 시도한다."""
+        self.halt_reason = why
+        print(f"[mission] ⛔ 멈춤: {why}")
+        self._insert_align = None
+        self._insert_align_from = None
+        self.ready_to_advance = False
+        self.last_cmd = "stop"
+        self._path_planner.reset()
+        self._drive.reset()
+        self.state = State.HALTED
 
     def step(self, pose: Pose, piece_map: PieceMap, link: VehicleLink) -> State:
         if not pose.ok:
@@ -344,8 +390,18 @@ class MissionFSM:
             # IDLE) — 그래서 GRASP_DONE 을 본 뒤로는 다시 안 묻고 그 사실을
             # ready_to_advance 에 붙들어 둔다(수동 모드에서 버튼 누를 때까지
             # 여러 사이클 걸릴 수 있어서, 매번 새로 물으면 신호를 놓친다).
-            if not self.ready_to_advance and link.poll_status() == "GRASP_DONE":
-                self.ready_to_advance = True
+            if not self.ready_to_advance:
+                status = link.poll_status()
+                if status == "GRASP_DONE":
+                    self.ready_to_advance = True
+                elif status == "FAILED":
+                    # Pi 는 두 독립 신호(그리퍼 부하 + 뎁스에서 물체가 사라짐)를
+                    # 다 확인하고서야 실패를 낸다. 같은 자리에서 다시 시켜도
+                    # 같은 결과일 가능성이 높으므로 **재시도하지 않고** 보류한다.
+                    # 보류가 가능한 이유는 아직 손이 비어 있어서다 — 투하 실패
+                    # (State.PLACE)는 물체를 든 채라 정책이 다르다.
+                    self._skip_target("Pi 파지 실패(GRASP_FAILED)")
+                    return self.state
 
             # Pi 가 "조건이 안 맞는다, 수정된 명령을 달라"고 했으면 재정렬로
             # 넘어간다. 여기서 아무것도 안 하면 Pi 는 계속 기다리고 Host 는
@@ -490,8 +546,50 @@ class MissionFSM:
             self.last_nav = None
             self.last_cmd = "stop"
             link.send(MissionCommand("stop", "PLACE", pose.x, pose.y, pose.yaw_deg))
-            if not self.ready_to_advance and link.poll_status() == "PLACE_DONE":
-                self.ready_to_advance = True
+            if not self.ready_to_advance:
+                status = link.poll_status()
+                if status == "PLACE_DONE":
+                    self.ready_to_advance = True
+                elif status == "FAILED":
+                    # 파지 실패와 달리 **보류할 수 없다** — 물체를 들고 있어서
+                    # 다음 기물로 갈 수가 없다. 상자 앞에서 다시 세우고
+                    # 재시도하되, 예산을 다 쓰면 멈춰서 사람을 부른다.
+                    self._insert_tries += 1
+                    if self._insert_tries > mcfg.INSERT_RETRY_MAX:
+                        self._halt(f"투하 {self._insert_tries - 1}회 재시도 실패 — "
+                                   "물체를 든 채로 멈춘다")
+                        return self.state
+                    print(f"[mission] 투하 실패 {self._insert_tries}/"
+                          f"{mcfg.INSERT_RETRY_MAX} — 상자 앞에서 다시 세운다")
+                    self._insert_align_tries = 0
+                    self._path_planner.reset()
+                    self._drive.reset()
+                    self.state = State.FACE_BOX
+                    return self.state
+
+            # Pi 가 "투하 조건이 안 맞는다"(INSERT_BLOCKED)고 했으면 대응한다.
+            # 여기서 아무것도 안 하면 Pi 는 계속 기다리고 Host 는 계속 PLACE 를
+            # 보내서 영원히 멈춰 있다 — GRASP 쪽과 같은 구조다.
+            correction = link.take_insert_correction()
+            if correction is not None and not self.ready_to_advance:
+                if correction.transient:
+                    # "차체가 아직 정지하지 않았다" 같은 것. 가만히 있으면
+                    # 풀린다 — 여기서 움직이면 판독이 또 흔들려서 조건이
+                    # 영영 안 맞는다. 명령을 바꾸지 않고 다음 사이클을 기다린다.
+                    pass
+                elif not correction.actionable:
+                    self._halt(f"투하 조건을 Host 가 못 고친다 — {correction.detail}")
+                    return self.state
+                elif self._insert_align_tries >= mcfg.INSERT_ALIGN_MAX_TRIES:
+                    self._halt(f"투하 재정렬 {self._insert_align_tries}회 소진 — "
+                               f"{correction.detail}")
+                    return self.state
+                else:
+                    self._insert_align = correction
+                    self._insert_align_from = (pose.x, pose.y, pose.yaw_deg)
+                    self._insert_align_tries += 1
+                    self.state = State.INSERT_ALIGN
+                    return self.state
             if self.ready_to_advance and self._should_advance():
                 # 하나 끝났다고 멈추지 않는다 — 다음 기물을 다시 찾는다.
                 # 화면에 기물이 더 없으면 SEARCH_TARGET 에서 계속 대기한다.
@@ -499,6 +597,60 @@ class MissionFSM:
                 self.target_label = None
                 self._target_xy = None
                 self.dest_xy = None
+                self._insert_tries = 0
+                self._insert_align_tries = 0
                 self.state = State.SEARCH_TARGET
+
+        elif self.state == State.INSERT_ALIGN:
+            # GRASP_ALIGN 과 같은 구조: 한 걸음만 움직이고 PLACE 로 돌아간다.
+            # 다른 점은 걸음이 잘고(창이 ±15mm 라 30mm 면 건너뛴다) 좌우
+            # 이동(SHIFT)이 있다는 것이다.
+            self.nav_goal = None
+            self.nav_corner = None
+            self.nav_path = None
+            self.last_nav = None
+            assert self._insert_align is not None
+            assert self._insert_align_from is not None
+            fx, fy, fyaw = self._insert_align_from
+            kind = self._insert_align.kind
+            sign = 1.0 if (self._insert_align.lateral_mm or 0.0) >= 0 else -1.0
+
+            if kind == RE_AIM:
+                # yaw_error 가 양수면 바구니 면의 법선이 왼쪽을 향한다 =
+                # 반시계로 돌아야 맞춰진다 (basket_lidar_align.py 의
+                # yaw_error = atan2(ny, nx), 정면 +x · 왼쪽 +y).
+                turned = abs((pose.yaw_deg - fyaw + 180.0) % 360.0 - 180.0)
+                done = turned >= mcfg.INSERT_ALIGN_YAW_STEP_DEG
+                cmd = "stop" if done else ("yaw+" if sign > 0 else "yaw-")
+            elif kind == SHIFT:
+                # 좌우 오차를 회전으로 고치면 거리와 yaw 가 같이 틀어져서 여섯
+                # 조건을 동시에 흔든다. 메카넘 횡이동이면 다른 조건을 안 건드린다.
+                moved = math.hypot(pose.x - fx, pose.y - fy)
+                done = moved >= mcfg.INSERT_ALIGN_LATERAL_STEP_M
+                cmd = "stop" if done else ("left" if sign > 0 else "right")
+            else:
+                moved = math.hypot(pose.x - fx, pose.y - fy)
+                done = moved >= mcfg.INSERT_ALIGN_STEP_M
+                cmd = "stop" if done else ("back" if kind == BACK_OFF else "go")
+
+            link.send(MissionCommand(cmd, "INSERT_ALIGN", pose.x, pose.y,
+                                      pose.yaw_deg))
+            self.last_cmd = cmd
+            self.ready_to_advance = done
+            if done and self._should_advance():
+                self._insert_align = None
+                self._insert_align_from = None
+                self.ready_to_advance = False
+                self.state = State.PLACE
+
+        elif self.state == State.HALTED:
+            # 물체를 든 채 서 있는다. 워치독에 걸려 Pi 가 멋대로 멈추지 않도록
+            # 명령은 계속 보낸다 — 보내는 것은 stop 이라 차는 안 움직인다.
+            self.nav_goal = None
+            self.nav_corner = None
+            self.nav_path = None
+            self.last_nav = None
+            self.last_cmd = "stop"
+            link.send(MissionCommand("stop", "HALTED", pose.x, pose.y, pose.yaw_deg))
 
         return self.state

@@ -108,6 +108,16 @@ _STATE_TO_PI = {
     "FACE_BOX":       MissionState.CARRY,
     "NUDGE_BOX":      MissionState.APPROACH_BOX,
     "PLACE":          MissionState.INSERT,
+    # INSERT_ALIGN -> APPROACH_BOX : GRASP_ALIGN 과 정확히 같은 이유다. Pi 를
+    #     INSERT 로 둔 채 차를 움직이면 매 사이클 투하 판정을 다시 돌려서
+    #     움직이는 내내 BLOCKED 를 뱉고, 그 판정에 쓰인 라이다 값은 어차피
+    #     "판독이 흔들린다"로 스스로 무효가 된다. APPROACH_BOX 로 주행만 하고
+    #     다시 PLACE 가 갈 때 한 번만 판정하게 한다.
+    "INSERT_ALIGN":   MissionState.APPROACH_BOX,
+    # HALTED -> CARRY : 물체를 든 채 사람을 기다리는 중이다. INSERT 로 두면
+    #     Pi 가 투하를 다시 시도할 수 있고, IDLE 로 두면 팔을 접는다. 둘 다
+    #     사람이 오기 전에 일어나면 안 된다. CARRY + stop 이 "들고 서 있기"다.
+    "HALTED":         MissionState.CARRY,
     "DONE":           MissionState.DONE,
 }
 
@@ -180,9 +190,16 @@ class GraspCorrection:
         """Host 가 차를 움직여 고칠 수 있는가."""
         if self.kind == UNFIXABLE:
             return False
-        if self.kind == RE_AIM and self.lateral_mm is None:
-            return False   # 방향을 모른다 — 찍어서 돌지 않는다
+        if self.kind == WAIT:
+            return False   # 움직여서 고치는 게 아니다. 기다린다
+        if self.kind in (RE_AIM, SHIFT) and self.lateral_mm is None:
+            return False   # 방향을 모른다 — 찍어서 움직이지 않는다
         return True
+
+    @property
+    def transient(self) -> bool:
+        """가만히 있으면 저절로 풀리는가. WAIT 는 실패가 아니라 대기다."""
+        return self.kind == WAIT
 
 
 def classify_correction(detail: str) -> GraspCorrection:
@@ -193,6 +210,80 @@ def classify_correction(detail: str) -> GraspCorrection:
         if key in (detail or ""):
             return GraspCorrection(kind, detail, lateral)
     return GraspCorrection(UNFIXABLE, detail, lateral)
+
+# ---------------------------------------------------------------------------
+# INSERT_BLOCKED 보정 요청 — 바구니 앞은 GRASP 와 사유 어휘가 다르다
+# ---------------------------------------------------------------------------
+#
+# GRASP 쪽 분류기를 그대로 쓰면 안 된다. 사유 문구가 다르기도 하지만, 더 중요한
+# 차이가 하나 있다 — **INSERT 차단 사유에는 "움직이면 안 되고 기다려야 하는
+# 것"이 섞여 있다.**
+#
+#     "차체가 아직 정지하지 않았다"
+#     "직전 판독이 없다 — 한 사이클 더 확인해야 한다"
+#     "판독이 흔들린다 (+Nmm) — 아직 움직이는 중이거나 관측이 불안정하다"
+#
+# 셋 다 **Host 가 가만히 있으면 저절로 풀립니다.** 여기에 대고 차를 3cm 움직이면
+# 판독이 또 흔들려서 조건이 영영 안 맞는다. 그래서 WAIT 를 따로 둔다.
+#
+# 문구 출처는 `domain/task/preconditions.py::check_insert`. GRASP 쪽과 같은
+# 취약점을 공유한다 — Pi 가 문구를 고치면 여기가 조용히 실패한다. 정식 해법도
+# 같다(`baseline_ports.py` 에 사유 코드 상수).
+
+SHIFT = "SHIFT"            # 좌우로 밀렸다 -> 메카넘 횡이동. lateral_mm 부호로 방향
+WAIT = "WAIT"              # 기다리면 풀린다. 움직이면 오히려 나빠진다
+
+_INSERT_KEYS = (
+    # 기다리면 풀리는 것 — 반드시 먼저 본다
+    ("차체가 아직 정지하지 않았다", WAIT),
+    ("직전 판독이 없다", WAIT),
+    ("판독이 흔들린다", WAIT),
+    # 차를 움직여 고치는 것
+    ("바구니가 멀다", CREEP_IN),
+    ("라이다 판독이 하한보다 가깝다", BACK_OFF),
+    # 테두리를 스치는 중이라는 조기 신호다. 더 가면 절벽(0.125m)이라 물러난다.
+    ("정면 점이 부족하다", BACK_OFF),
+    ("정렬이 틀어졌다", RE_AIM),
+    ("좌우로 밀려 있다", SHIFT),
+)
+
+# "yaw +0.123rad" 에서 부호를 읽는다. 차량 정면이 +x, 왼쪽이 +y 이고
+# yaw_error = atan2(ny, nx) 이므로(basket_lidar_align.py:351), **양수면 바구니
+# 면의 법선이 왼쪽을 향한다 = 반시계(yaw+)로 돌아야 한다.**
+_YAW_RE = re.compile(r"yaw\s*([+-]?\d+(?:\.\d+)?)\s*rad")
+
+
+def classify_insert_correction(detail: str) -> GraspCorrection:
+    """Pi 의 INSERT_BLOCKED `detail` -> `GraspCorrection`. 모르면 UNFIXABLE.
+
+    `detail` 에는 사유가 **여러 개 한꺼번에** 올 수 있다(`check_insert` 가
+    reasons 를 모아서 낸다). 그래서 `_INSERT_KEYS` 순서가 곧 우선순위다 —
+    기다리면 풀리는 것이 하나라도 섞여 있으면 **움직이지 않는다.** 판독이
+    아직 안 정해진 상태에서 낸 거리·yaw 값을 믿고 움직이면 안 되기 때문이다.
+    """
+    text = detail or ""
+    lateral = None
+    m = _LATERAL_RE.search(text)
+    if m:
+        lateral = float(m.group(1))
+    else:
+        # "좌우로 밀려 있다 (+85mm > ±70mm)" 형식도 받는다.
+        m2 = re.search(r"좌우로 밀려 있다\s*\(([+-]?\d+(?:\.\d+)?)\s*mm", text)
+        if m2:
+            lateral = float(m2.group(1))
+
+    for key, kind in _INSERT_KEYS:
+        if key in text:
+            if kind is RE_AIM:
+                my = _YAW_RE.search(text)
+                if my is None:
+                    return GraspCorrection(UNFIXABLE, detail, lateral)
+                # yaw 부호를 lateral_mm 자리에 실어 보낸다 — mission.py 의
+                # 회전 방향 판정이 "부호가 양수면 yaw+" 로 GRASP 와 같다.
+                return GraspCorrection(RE_AIM, detail, float(my.group(1)))
+            return GraspCorrection(kind, detail, lateral)
+    return GraspCorrection(UNFIXABLE, detail, lateral)
+
 
 # 같은 경고를 이 간격보다 자주 찍지 않는다. REJECTED 는 Pi 워치독이 발동할
 # 때마다 나오는데, Host 주기가 워치독 한계보다 느리면 초당 여러 번이 된다 —
@@ -206,6 +297,9 @@ def encode(cmd: MissionCommand) -> HostCommand:
     네 가지 동작이 속도 넷으로 어떻게 옮겨지는가:
 
         go     -> linear_x = +AGREED_LINEAR_MPS
+        back   -> linear_x = -AGREED_LINEAR_MPS
+        left   -> linear_y = +AGREED_LINEAR_MPS       (메카넘 횡이동)
+        right  -> linear_y = -AGREED_LINEAR_MPS
         stop   -> stop = True            (나머지 셋을 무시하는 가장 센 명령)
         yaw+   -> angular_z = +AGREED_ROTATION_RAD_S   (반시계)
         yaw-   -> angular_z = -AGREED_ROTATION_RAD_S   (시계)
@@ -231,6 +325,13 @@ def encode(cmd: MissionCommand) -> HostCommand:
         # 바뀌면서 부호만 뒤집으면 되는 것이 됐다 — Pi 의 `_clamp` 가
         # copysign 이라 음수 크기를 그대로 잘라 준다. GRASP_ALIGN 이 쓴다.
         return HostCommand(state=state, linear_x=-AGREED_LINEAR_MPS)
+    if cmd.cmd == "left":
+        # 메카넘 횡이동. 다섯 필드에 이미 있는 linear_y 라 프로토콜 확장이
+        # 아니다. INSERT_ALIGN 이 쓴다 — 바구니 앞 좌우 오차는 회전으로 고치면
+        # 거리와 yaw 가 같이 틀어져서 세 조건을 동시에 흔든다.
+        return HostCommand(state=state, linear_y=AGREED_LINEAR_MPS)
+    if cmd.cmd == "right":
+        return HostCommand(state=state, linear_y=-AGREED_LINEAR_MPS)
     if cmd.cmd == "yaw+":
         return HostCommand(state=state, angular_z=AGREED_ROTATION_RAD_S)
     if cmd.cmd == "yaw-":
@@ -250,12 +351,25 @@ class VehicleLink:
     #: 한 번의 요청으로 한 번만 움직이기 위해서다.
     last_correction: Optional[GraspCorrection] = None
 
+    #: 마지막 INSERT_BLOCKED 가 요청한 재정렬. PLACE 가 읽는다.
+    #:
+    #: ⚠️ **GRASP 것과 반드시 따로 둔다.** 예전에는 슬롯이 하나여서, PLACE 중에
+    #: 온 INSERT_BLOCKED 를 아무도 안 읽고 남겼다가 다음 기물의 GRASP 가
+    #: 집어갔다 — 바구니 얘기를 기물 얘기로 읽고 엉뚱하게 3cm 움직이거나,
+    #: actionable=False 면 멀쩡한 기물을 이유 없이 보류했다.
+    last_insert_correction: Optional[GraspCorrection] = None
+
     def take_correction(self) -> Optional[GraspCorrection]:
-        """보정 요청을 **소비한다.** 없으면 None.
+        """GRASP 보정 요청을 **소비한다.** 없으면 None.
 
         지우지 않고 두면 Host 가 한 번의 BLOCKED 로 계속 움직인다 — Pi 는
         재관측할 때마다 새로 보고하므로, 매 요청당 한 걸음이 맞다."""
         c, self.last_correction = self.last_correction, None
+        return c
+
+    def take_insert_correction(self) -> Optional[GraspCorrection]:
+        """INSERT 보정 요청을 소비한다. 없으면 None."""
+        c, self.last_insert_correction = self.last_insert_correction, None
         return c
 
     def send(self, cmd: MissionCommand) -> None:
@@ -425,8 +539,10 @@ class UdpVehicleLink(VehicleLink):
                 return "FAILED"
             return "PLACE_DONE"
 
-        if report in (Report.GRASP_BLOCKED, Report.INSERT_BLOCKED):
+        if report == Report.GRASP_BLOCKED:
             self.last_correction = classify_correction(detail)
+        elif report == Report.INSERT_BLOCKED:
+            self.last_insert_correction = classify_insert_correction(detail)
 
         if report in _BLOCKING_REPORTS:
             # Pi 가 "조건이 안 맞는다, 수정된 명령을 달라"고 말하는 중이다.

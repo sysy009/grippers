@@ -218,6 +218,23 @@ GRASP_ALIGN_STEP_M = 0.03        # 전/후진 한 걸음. 턱 쓸기 구간 폭�
 GRASP_ALIGN_YAW_STEP_DEG = 3.0   # 좌우 겨눔 한 걸음. DRIVE_YAW_TOLERANCE_DEG(5도)보다 작다
 GRASP_ALIGN_MAX_TRIES = 5        # 이만큼 해도 안 되면 그 기물은 보류하고 다음으로
 
+# INSERT_BLOCKED 재정렬 — 바구니 앞. GRASP 쪽보다 걸음을 잘게 쓴다.
+#
+# 이유는 바구니 판정 창이 좁기 때문이다. 라이다 목표 0.140 m 의 허용폭이
+# ±15 mm 인데, 30 mm 를 움직이면 창을 통째로 건너뛴다. 그런데 Pi 의 최소
+# 버스트가 약 20 mm 라(데드밴드) 그보다 잘게는 못 간다 — 20 mm 로 둔다.
+INSERT_ALIGN_STEP_M = 0.02
+INSERT_ALIGN_YAW_STEP_DEG = 2.0   # BASKET_YAW_TOLERANCE(5.0도)의 절반 이하
+INSERT_ALIGN_LATERAL_STEP_M = 0.02
+INSERT_ALIGN_MAX_TRIES = 8        # GRASP(5)보다 넉넉하다 — 조건이 여섯 개다
+
+# INSERT_FAILED 를 받았을 때 상자 앞에서 다시 세우고 재시도하는 횟수.
+#
+# ⚠️ GRASP 실패와 정책이 다르다. 파지 실패는 그 기물을 보류하고 다음으로 가면
+#    되지만, **투하 실패는 물체를 든 채라 갈 곳이 없다.** 그래서 보류가 아니라
+#    재시도하고, 예산을 다 쓰면 HALTED 로 멈춰 사람을 부른다.
+INSERT_RETRY_MAX = 2
+
 # 보류한 기물을 다시 후보로 보지 않을 반경. PIECE_MERGE_DIST_M 과 같은 척도다.
 SKIP_RADIUS_M = 0.10
 
