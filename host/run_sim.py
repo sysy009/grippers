@@ -203,6 +203,67 @@ def _drop_piece(pmap: PieceMap, label: str) -> None:
     pmap.setdefault(label, []).append((bx, by))
 
 
+def _headless(args) -> int:
+    """LiveMap 없이 통주행하고 요약만 낸다.
+
+    **왜 따로 있는가** — `main()` 은 창이 닫힐 때까지 도는 구조라 자동 검증에
+    쓸 수 없다. FSM 을 고칠 때마다 성공 경로가 그대로인지 봐야 하는데, 사람이
+    창을 보고 판단하는 방법밖에 없었다.
+
+    ⚠️ `SimVehicleLink` 의 GRASP/PLACE 완료 판정이 **벽시계**라, 사이클을 빨리
+    돌리면 타이머가 안 끝나 GRASP 에서 멈춘 것처럼 보인다. 그래서 여기서는
+    `action_sec=0` 으로 즉시 완료시킨다.
+
+    ⚠️ 기물 총 개수로 판정하면 안 된다 — `_drop_piece` 가 상자 중심에 다시
+    넣으므로 총합은 안 줄어든다. **작업 영역 안**에 남은 개수를 본다.
+    """
+    def in_ws(pmap) -> int:
+        return sum(1 for pts in pmap.values() for x, y in pts
+                   if cfg.in_workspace(x, y))
+
+    robot = SimRobot(speed=args.speed, yaw_rate=args.yaw_rate)
+    pieces = _copy_pieces()
+    fsm = MissionFSM(manual_mode=args.step)
+    link = SimVehicleLink(action_sec=0.0, quiet=True)
+
+    total = in_ws(pieces)
+    dt = 1.0 / SIM_HZ
+    carried: Optional[str] = None
+    prev = fsm.state
+    transitions = 0
+    seen = set()
+
+    for i in range(args.max_cycles):
+        pose = robot.pose(noise_m=args.noise)
+        fsm.step(pose, pieces, link)
+        if prev == State.GRASP and fsm.state == State.CARRY_TO_DEST:
+            carried = fsm.target_label
+            if carried:
+                _take_piece(pieces, carried, (pose.x, pose.y))
+        elif prev == State.PLACE and fsm.state == State.SEARCH_TARGET:
+            if carried:
+                _drop_piece(pieces, carried)
+            carried = None
+        if fsm.state != prev:
+            transitions += 1
+            seen.add(fsm.state.name)
+        prev = fsm.state
+        robot.apply(link.last if fsm.state not in
+                    (State.SEARCH_TARGET, State.GRASP, State.PLACE) else None, dt)
+        if in_ws(pieces) == 0:
+            break
+
+    left = in_ws(pieces)
+    print(f"작업영역 기물 {total} -> {left} · 전이 {transitions}회 · {i + 1} 사이클")
+    print("밟은 상태:", " ".join(sorted(seen)))
+    print("최종 pose: (%.3f, %.3f, %.1f)" % (robot.pose().x, robot.pose().y,
+                                             robot.pose().yaw_deg))
+    if fsm.state is State.HALTED:
+        print(f"⛔ HALTED — {fsm.halt_reason}")
+    print("결과:", "OK" if left == 0 else "FAIL — 다 못 옮겼다")
+    return 0 if left == 0 else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="카메라·모델·차량 없이 LiveMap 과 미션 로직만 돌리는 리허설")
@@ -215,7 +276,15 @@ def main() -> int:
     ap.add_argument("--noise", type=float, default=0.0,
                     help="pose 에 섞을 표준편차 m (예: 0.005 = 5 mm). 기본 0(무잡음)")
     ap.add_argument("--quiet", action="store_true", help="명령 로그를 찍지 않는다")
+    ap.add_argument("--headless", action="store_true",
+                    help="LiveMap 없이 끝까지 돌리고 결과만 낸다 (회귀 검증용). "
+                         "기물을 다 옮기면 0, 못 옮기면 1 로 끝난다")
+    ap.add_argument("--max-cycles", type=int, default=20000,
+                    help="--headless 에서 이 사이클 안에 못 끝내면 실패로 본다")
     args = ap.parse_args()
+
+    if args.headless:
+        return _headless(args)
 
     signal.signal(signal.SIGINT, _on_sigint)
 

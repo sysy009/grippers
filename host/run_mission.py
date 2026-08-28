@@ -25,7 +25,7 @@ VEHICLE_LINK_PROTOCOL.md 참고.
 사용법
     python run_mission.py
     python run_mission.py --cams 0 2
-    python run_mission.py --show-cams   # 카메라 원본 창도 같이
+    python run_mission.py --no-view --show-cams   # 카메라 원본 창만 (LiveMap 과 동시 사용 불가)
     python run_mission.py --no-view
     python run_mission.py --mock-complete   # 차량 없이 전체 흐름만 시험
     python run_mission.py --step --mock-complete   # 단계마다 LiveMap 의 Next 버튼으로 직접 진행
@@ -33,7 +33,8 @@ VEHICLE_LINK_PROTOCOL.md 참고.
 
 화면은 기본으로 live_map.py 의 2D 지도(로봇/기물/상자/이동경로를 도형으로)
 하나만 뜬다. 카메라 원본 + ArUco/geti 오버레이 창은 디버깅용이라 필요할 때만
---show-cams 로 따로 켠다.
+--show-cams 로 따로 켠다. ⚠️ 이 둘은 **같이 못 쓴다** — GUI 이벤트 루프가 둘이
+되면서 GIL 크래시가 난다. 그래서 `--show-cams` 는 `--no-view` 를 요구한다.
 """
 
 from __future__ import annotations
@@ -73,7 +74,8 @@ def main() -> int:
     ap.add_argument("--cams", type=int, nargs="+", default=list(cfg.CAM_INDICES))
     ap.add_argument("--no-view", action="store_true")
     ap.add_argument("--show-cams", action="store_true",
-                     help="카메라 원본 + ArUco/geti 오버레이 창도 같이 띄운다 (디버깅용)")
+                     help="카메라 원본 + ArUco/geti 오버레이 창도 같이 띄운다 "
+                          "(디버깅용. --no-view 와 같이 쓸 것)")
     ap.add_argument("--geti-device", type=str, default="CPU")
     ap.add_argument("--mock-complete", action="store_true",
                      help="차량이 아직 없을 때 GRASP/PLACE 를 즉시 완료된 것으로 흉내낸다(시험용)")
@@ -88,6 +90,23 @@ def main() -> int:
     ap.add_argument("--hz-every", type=int, default=20,
                     help="N 사이클마다 루프 Hz 와 단계별 소요를 출력한다(0이면 끄기)")
     args = ap.parse_args()
+
+    # LiveMap 과 --show-cams 를 같이 켜면 **프로세스가 죽는다.** 한 프로세스에
+    # GUI 이벤트 루프가 둘이 되기 때문이다 — LiveMap 은 matplotlib TkAgg,
+    # --show-cams 는 OpenCV HighGUI. cv2.waitKey(1) 이 GIL 을 놓고 Win32 메시지
+    # 펌프를 도는 사이 Tk 콜백이 끼어들면 즉시 죽는다:
+    #
+    #     Fatal Python error: PyEval_RestoreThread: the function must be called
+    #     with the GIL held, but the GIL is released
+    #
+    # geti 워커 2개가 GIL 을 계속 놨다 잡았다 하니 확률이 더 올라간다. 시연
+    # 도중에 이 조합을 실수로 켜면 미션이 통째로 죽으므로, 주석으로 두지 않고
+    # 여기서 막는다.
+    if args.show_cams and not args.no_view:
+        print("\n--show-cams 는 LiveMap 과 같이 못 씁니다 (cv2 HighGUI ↔ "
+              "matplotlib Tk 충돌로 GIL 크래시).")
+        print("카메라 원본이 필요하면:  python run_mission.py --no-view --show-cams")
+        return 2
 
     signal.signal(signal.SIGINT, _on_sigint)
 
