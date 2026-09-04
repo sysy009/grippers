@@ -3,12 +3,13 @@
 <package format="3">
   <name>grippers_vla</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>VLA 정책 추론 노드</description>
   <maintainer email="11306260+liangfuyuan@user.noreply.gitee.com">ubuntu</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
   <depend>grippers_interfaces</depend>
+  <depend>sensor_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

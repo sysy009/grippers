@@ -14,10 +14,12 @@ setup(
     zip_safe=True,
     maintainer="ubuntu",
     maintainer_email="11306260+liangfuyuan@user.noreply.gitee.com",
-    description="TODO: Package description",
+    description="VLA 정책 추론 노드 — 정책이 낸 관절 청크를 arm_driver 로 재생시킨다",
     license="TODO: License declaration",
     tests_require=["pytest"],
     entry_points={
-        "console_scripts": [],
+        "console_scripts": [
+            "vla_inference_node = grippers_vla.vla_inference_node:main",
+        ],
     },
 )

@@ -1,0 +1,18 @@
+# VLA 정책 입력용 관절 상태 — 정책이 학습된 좌표계로 돌려준다.
+#
+# ## 왜 GetArmState 로는 안 되는가
+#
+# GetArmState 는 `position_raw`, 즉 **이 노드의 raw** 를 준다. 정책이 학습된
+# LeRobot 좌표계와는 servo 마다 상수만큼 어긋나 있다(ExecuteJointChunk.action 의
+# 표 참고 — wrist_roll 은 86도 차이다). 변환에는 정책 캘리브레이션과 서보에
+# 실제로 올라간 Homing_Offset 이 둘 다 필요한데, 그 둘을 다 아는 곳은
+# arm_driver 뿐이다. 그래서 변환까지 마친 값을 여기서 내준다.
+#
+# ExecuteJointChunk 가 받는 단위와 **정확히 같다.** 관측과 명령이 같은 좌표계여야
+# 정책이 자기 출력을 다음 관측으로 다시 볼 수 있다.
+---
+bool ok
+string message
+# servo 1..6 순서. servo 1..5 는 도(MotorNormMode.DEGREES),
+# servo 6 은 0..100 개구율(RANGE_0_100).
+float32[6] positions

@@ -1,0 +1,41 @@
+# VLA 정책으로 파지를 한 번 수행한다. FSM 이 이 액션 하나만 부르면 된다.
+#
+# ## 무엇을 하는가
+#
+# vla_inference 노드가 아래를 반복한다:
+#
+#   1. 그리퍼캠 프레임 + 관절 상태(GetPolicyState)를 읽는다
+#   2. 정책을 돌려 관절 청크를 얻는다
+#   3. arm_driver 의 ExecuteJointChunk 로 그 청크를 재생시킨다
+#   4. 재생이 끝나면 1로 — timeout_sec 까지
+#
+# ## ⚠️ 이 액션은 "물체를 골라 오라"가 아니다
+#
+# task 문자열은 **정책 입력으로 그대로 전달될 뿐, 물체를 고르지 않는다.**
+# 2026-09-04 실측:
+#
+#   ACT       task 를 입력으로 아예 안 받는다 (modeling_act.py 에 문자열 경로 없음)
+#   SmolVLA   받기는 하지만 효과가 프레임 효과의 10% — 궤적을 못 바꾼다
+#
+# 정책은 **그리퍼캠 정면 중앙에 있는 것**을 집는다. 학습 데이터에서 목표가 항상
+# 중앙이었기 때문이다(shoulder_pan std 5.58, 6종 평균이 전부 -4.6~+0.6도).
+# 그러니 **어느 물체를 집을지는 이 액션을 부르기 전에 주행부가 정한다.**
+# task 는 기록과 SmolVLA 계열을 위한 자리다.
+
+# 정책에 넣을 지시문. 데이터셋의 task 문자열과 같은 형식이 좋다
+# (예: "pick up the rook"). 위 경고 참고 — 이것이 물체를 고르지는 않는다.
+string task
+# 최대 수행 시간. 0 이하면 노드 기본값을 쓴다.
+float32 timeout_sec
+# 스텝당 관절 이동 상한(도). 0 이하면 노드 기본값. ExecuteJointChunk 로 그대로 넘어간다.
+float32 max_step_deg
+---
+bool ok
+string message
+uint32 chunks_executed
+---
+uint32 chunk
+float32 elapsed_sec
+# 마지막 추론에 걸린 시간(ms). 청크 수명보다 크면 팔이 청크 사이에서 멈춘다 —
+# 노트북 CPU 의 SmolVLA 가 그 경우다(2026-09-04: forward 3946ms vs 수명 1670ms).
+float32 inference_ms
