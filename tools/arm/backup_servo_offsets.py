@@ -16,6 +16,9 @@ CARRY_RAW 등). Homing_Offset 이 바뀌면 **같은 RAW 값이 다른 물리 �
 
     python backup_servo_offsets.py COM8            # 백업
     python backup_servo_offsets.py COM8 --restore <파일>   # 복구
+
+복구는 `Homing_Offset` 과 **위치 한계(Min/Max_Position_Limit)** 를 되돌린다.
+속도 상한은 `--with-velocity` 를 줘야 한다.
 """
 import json
 import sys
@@ -96,6 +99,20 @@ def restore(port: str, src: str) -> int:
         if isinstance(v, int):
             bus.write("Homing_Offset", name, v, normalize=False)
             print(f"  {name:14s} Homing_Offset <- {v}")
+        # 위치 한계도 되돌린다. 예전에는 Homing_Offset 만 복구했는데, 그러면
+        # **오프셋은 맞는데 관절이 안 움직이는** 상태가 된다 - 2026-09-03 에
+        # 그리퍼가 정책 단위 27 에서 막혀 롤아웃이 통째로 헛돌았다. 원인은
+        # 남의 캘리브레이션이 남긴 Max_Position_Limit=2090 이었고, 오프셋만
+        # 복구해서는 그게 안 지워졌다.
+        #
+        # wrist_roll 은 더 위험하다. 이 팔은 그 관절을 2040~2054(14카운트)로
+        # 좁혀 잠가 두는데(record_retry.py 참고), 잠금이 풀리면 정규화가
+        # 14카운트 기준이라 raw 가 조금만 움직여도 정규화값이 튄다.
+        for reg in ("Min_Position_Limit", "Max_Position_Limit"):
+            lim = row.get(reg)
+            if isinstance(lim, int):
+                bus.write(reg, name, lim, normalize=False)
+                print(f"  {name:14s} {reg} <- {lim}")
         if "--with-velocity" in sys.argv:
             mv = row.get("Maximum_Velocity_Limit")
             if isinstance(mv, int):

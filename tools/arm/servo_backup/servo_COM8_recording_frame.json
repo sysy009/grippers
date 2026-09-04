@@ -1,0 +1,37 @@
+{
+  "port": "COM8",
+  "when": "derived-from-grippers_arm.json (2026-09-02 16:38 캘리브레이션 = v5 녹화 프레임)",
+  "note": "homing/위치한계를 녹화 시점 캘리브레이션에서 그대로 가져왔다. 그리퍼 max 2427 은 팔로워가 실제 98.72 까지 간 기록과 맞는 값이다(09-01 백업의 2378 은 상한 89.5 라 불가능).",
+  "motors": {
+    "shoulder_pan": {
+      "Homing_Offset": -1917,
+      "Min_Position_Limit": 1022,
+      "Max_Position_Limit": 3109
+    },
+    "shoulder_lift": {
+      "Homing_Offset": -1757,
+      "Min_Position_Limit": 822,
+      "Max_Position_Limit": 3194
+    },
+    "elbow_flex": {
+      "Homing_Offset": 1338,
+      "Min_Position_Limit": 876,
+      "Max_Position_Limit": 3070
+    },
+    "wrist_flex": {
+      "Homing_Offset": 1794,
+      "Min_Position_Limit": 862,
+      "Max_Position_Limit": 3175
+    },
+    "wrist_roll": {
+      "Homing_Offset": -872,
+      "Min_Position_Limit": 2040,
+      "Max_Position_Limit": 2054
+    },
+    "gripper": {
+      "Homing_Offset": 390,
+      "Min_Position_Limit": 1960,
+      "Max_Position_Limit": 2427
+    }
+  }
+}

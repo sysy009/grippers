@@ -53,6 +53,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dshow_patch import patch_dshow_property_order
 from rerun_downscale import MAX_EDGE, patch_rerun_downscale
+from batch_encode_patch import patch_batch_encode
+from camera_focus import patch_camera_focus
 from feetech_retry import RETRY, patch_bus
 
 #: 리더가 읽힌 wrist_roll 을 이 값으로 덮는다. 팔로워 서보 가동범위
@@ -96,6 +98,16 @@ def main() -> int:
         print("카메라: 해상도를 FOURCC 보다 먼저 적용합니다 (DSHOW MJPG 협상용).")
     if patch_rerun_downscale():
         print(f"rerun 이미지를 긴 변 {MAX_EDGE}px 로 줄여 보냅니다 (루프 예산 보호).")
+    if patch_batch_encode():
+        print("배치 영상 인코딩을 동작하는 구현으로 교체했습니다.")
+    # 초점은 GRIP_CAM_FOCUS 환경변수로 받는다. rec_piece.ps1 의 -Focus 가 이걸 채운다.
+    # 값이 없으면 아무것도 하지 않는다 - 카메라 상태를 조용히 바꾸지 않기 위해서다.
+    _focus = os.environ.get("GRIP_CAM_FOCUS")
+    if _focus and patch_camera_focus(int(_focus)):
+        print(f"카메라 초점을 {_focus} 로 고정합니다 (오토포커스 끔).")
+    elif not _focus:
+        print("경고: 초점을 고정하지 않습니다. 화질이 직전 프로그램이 남긴 상태에 좌우됩니다.")
+        print("      camera_focus.py 로 값을 찾아 -Focus 로 넘기세요.")
     if _patch_leader_wrist_roll():
         print(f"wrist_roll 을 {WRIST_ROLL_FREEZE_DEG}도로 고정합니다 (리더 입력을 덮어씀).")
     else:

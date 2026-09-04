@@ -1,0 +1,84 @@
+{
+  "port": "COM8",
+  "when": "2026-09-03T15:31:27",
+  "motors": {
+    "shoulder_pan": {
+      "Homing_Offset": -1917,
+      "Min_Position_Limit": 932,
+      "Max_Position_Limit": 3425,
+      "Present_Position": 2018,
+      "Maximum_Velocity_Limit": 65,
+      "Torque_Limit": 1000,
+      "Max_Torque_Limit": 1000,
+      "Acceleration": 254,
+      "Maximum_Acceleration": 254,
+      "P_Coefficient": 16,
+      "Present_Temperature": 32
+    },
+    "shoulder_lift": {
+      "Homing_Offset": -1757,
+      "Min_Position_Limit": 817,
+      "Max_Position_Limit": 3196,
+      "Present_Position": 842,
+      "Maximum_Velocity_Limit": 65,
+      "Torque_Limit": 1000,
+      "Max_Torque_Limit": 1000,
+      "Acceleration": 254,
+      "Maximum_Acceleration": 254,
+      "P_Coefficient": 16,
+      "Present_Temperature": 36
+    },
+    "elbow_flex": {
+      "Homing_Offset": 1338,
+      "Min_Position_Limit": 889,
+      "Max_Position_Limit": 3101,
+      "Present_Position": 3063,
+      "Maximum_Velocity_Limit": 65,
+      "Torque_Limit": 1000,
+      "Max_Torque_Limit": 1000,
+      "Acceleration": 254,
+      "Maximum_Acceleration": 254,
+      "P_Coefficient": 16,
+      "Present_Temperature": 31
+    },
+    "wrist_flex": {
+      "Homing_Offset": 1794,
+      "Min_Position_Limit": 870,
+      "Max_Position_Limit": 3224,
+      "Present_Position": 2846,
+      "Maximum_Velocity_Limit": 65,
+      "Torque_Limit": 1000,
+      "Max_Torque_Limit": 1000,
+      "Acceleration": 254,
+      "Maximum_Acceleration": 254,
+      "P_Coefficient": 16,
+      "Present_Temperature": 32
+    },
+    "wrist_roll": {
+      "Homing_Offset": -872,
+      "Min_Position_Limit": 129,
+      "Max_Position_Limit": 3995,
+      "Present_Position": 2050,
+      "Maximum_Velocity_Limit": 65,
+      "Torque_Limit": 1000,
+      "Max_Torque_Limit": 1000,
+      "Acceleration": 254,
+      "Maximum_Acceleration": 254,
+      "P_Coefficient": 16,
+      "Present_Temperature": 33
+    },
+    "gripper": {
+      "Homing_Offset": 390,
+      "Min_Position_Limit": 1140,
+      "Max_Position_Limit": 2090,
+      "Present_Position": 2079,
+      "Maximum_Velocity_Limit": 65,
+      "Torque_Limit": 500,
+      "Max_Torque_Limit": 500,
+      "Acceleration": 254,
+      "Maximum_Acceleration": 254,
+      "P_Coefficient": 16,
+      "Present_Temperature": 43
+    }
+  }
+}

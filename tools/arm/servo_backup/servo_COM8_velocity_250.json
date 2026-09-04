@@ -1,0 +1,25 @@
+{
+  "port": "COM8",
+  "when": "velocity-only (2026-09-03)",
+  "note": "속도 상한만 담는다. Homing_Offset 과 위치 한계는 일부러 빼서, 복원해도 지금 값(녹화 프레임)이 유지되게 했다. 그리퍼 max 2427 을 2378 로 되돌리면 안 되기 때문이다.",
+  "motors": {
+    "shoulder_pan": {
+      "Maximum_Velocity_Limit": 250
+    },
+    "shoulder_lift": {
+      "Maximum_Velocity_Limit": 250
+    },
+    "elbow_flex": {
+      "Maximum_Velocity_Limit": 250
+    },
+    "wrist_flex": {
+      "Maximum_Velocity_Limit": 250
+    },
+    "wrist_roll": {
+      "Maximum_Velocity_Limit": 250
+    },
+    "gripper": {
+      "Maximum_Velocity_Limit": 250
+    }
+  }
+}
