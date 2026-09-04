@@ -16,6 +16,7 @@ soarm_lab.arm을 그대로 감싼다. 새 IK/서보 로직은 없음.
 """
 
 import fcntl
+import json
 import math
 import os
 import sys
@@ -25,9 +26,20 @@ sys.path.insert(0, "/third_party/soarm_provided_d")  # PYTHONPATH 미설정 환�
 
 import rclpy  # noqa: I001
 import rclpy.logging  # main()이 노드 생성 실패 시 노드 없이 로그를 남긴다
-from grippers_interfaces.action import MoveToCartesian, MoveToFloorPose, ReorientArm
-from grippers_interfaces.srv import GetArmState, GetLoad, OffsetBaseYaw, SetGripper
-from rclpy.action import ActionServer
+from grippers_interfaces.action import (
+    ExecuteJointChunk,
+    MoveToCartesian,
+    MoveToFloorPose,
+    ReorientArm,
+)
+from grippers_interfaces.srv import (
+    GetArmState,
+    GetLoad,
+    GetPolicyState,
+    OffsetBaseYaw,
+    SetGripper,
+)
+from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from std_srvs.srv import Trigger
@@ -148,6 +160,28 @@ FLOOR_POSE_ARRIVE_MAX_SEC = 25.0
 # (_read_joint_positions 주석 참고).
 JOINT_READ_ATTEMPTS = 3
 JOINT_READ_RETRY_SEC = 0.05
+
+# ── VLA 관절 청크 재생(ExecuteJointChunk) ──────────────────────────────────
+# STS3215 한 바퀴 = 4096 카운트지만 LeRobot 이 정규화에 쓰는 분모는
+# `model_resolution_table[...] - 1` = 4095 다(motors_bus._normalize).
+# 여기서도 같은 값을 써야 왕복 변환이 딱 떨어진다.
+STS3215_RESOLUTION_MINUS_1 = 4095
+# Goal_Velocity. 0 = 무제한이고, 수집 때 팔로워가 리더를 쫓던 조건이 그것이다.
+#
+# ⚠️ 여기를 0 이 아닌 값으로 두면 정책이 조용히 망가진다. 2026-09-02 실기:
+# align_to_idle 이 남긴 150 raw/s 가 서보 RAM 에 남아 있어서, 정책이
+# shoulder_lift 를 50도로 부르는데 팔은 12.1도/s 로만 갔다. 스텝당 이동
+# 상한이 **현재 위치** 기준이라, 못 따라간 만큼 다음 목표가 더 잘리고 그게
+# 다시 뒤처짐을 키운다. 그래서 재생 시작마다 명시적으로 다시 쓴다.
+VLA_SPEED_RAW = 0
+VLA_ACCEL_RAW = 30
+# 스텝당 관절 이동 상한 기본값(도). rollout_policy.py 의 --max-rel 기본값과
+# 같은 자리다 — 정책이 분포 밖 입력에 튀어도 한 스텝에 갈 수 있는 거리를 묶는다.
+VLA_MAX_STEP_DEG_DEFAULT = 5.0
+# 청크 하나의 상한. 100스텝 x 30fps = 3.33초가 정상이고, 그 몇 배를 넘는
+# 요청은 인터페이스를 잘못 쓴 것으로 보고 거부한다.
+VLA_MAX_STEPS = 500
+
 MAX_FLOOR_POSE_SERVO2_TEMP_C = 50
 FLOOR_POSE_START_TOLERANCE_RAW = 120
 # ⚠️ 위 120 raw(약 10.5도)는 **교시 자세 단계 사이**를 오갈 때 쓰라고 정한
@@ -265,6 +299,16 @@ class ArmDriverNode(Node):
         # 런타임에 ros2 param set으로만 내릴 수 있게 해서, 평소 경로에서는
         # 실수로 낮은 값이 쓰이지 않는다.
         self.declare_parameter("min_gripper_width_mm", GRIPPER_GRASP_MIN_MM)
+        # VLA 정책이 학습된 LeRobot 캘리브레이션 파일 경로.
+        #
+        # 비워 두면 ExecuteJointChunk 가 아예 거부된다 — 기본값을 지어내면
+        # servo 5 가 85도 어긋난 데로 가기 때문에(ExecuteJointChunk.action 의
+        # 표 참고) 없으면 없는 대로 멈추는 쪽이 맞다.
+        #
+        # 노트북의 원본은 ~/.cache/huggingface/lerobot/calibration/robots/
+        # so_follower/grippers_arm.json 이고, Pi 에는 이 파일을 같이 배포해야
+        # 한다. 정책을 다시 학습하면 그때 쓴 캘리브레이션으로 같이 바꿀 것.
+        self.declare_parameter("policy_calibration_file", "")
 
         arm_port = self.get_parameter("arm_port").value
         enable_torque_on_start = bool(self.get_parameter("enable_torque_on_start").value)
@@ -307,6 +351,23 @@ class ArmDriverNode(Node):
             MoveToFloorPose,
             "arm_driver/move_to_floor_pose",
             execute_callback=self._execute_floor_pose,
+            callback_group=cb_group,
+        )
+        self._policy_calibration = self._load_policy_calibration(soarm._real)
+        # 다른 액션과 달리 cancel_callback을 준다 — 재생 중 E-STOP이 여기로
+        # 들어온다. 기본값은 거부라서 명시하지 않으면 취소가 안 먹는다.
+        self._joint_chunk_action_server = ActionServer(
+            self,
+            ExecuteJointChunk,
+            "arm_driver/execute_joint_chunk",
+            execute_callback=self._execute_joint_chunk,
+            cancel_callback=lambda _goal_handle: CancelResponse.ACCEPT,
+            callback_group=cb_group,
+        )
+        self.create_service(
+            GetPolicyState,
+            "arm_driver/get_policy_state",
+            self._on_get_policy_state,
             callback_group=cb_group,
         )
         self.create_service(
@@ -673,6 +734,269 @@ class ArmDriverNode(Node):
         except Exception as e:
             self.get_logger().error(f"수평 파지 자세 하드웨어 오류: {e}")
             result.reached = False
+            goal_handle.abort()
+        return result
+
+    # ── VLA 관절 청크 재생 ──────────────────────────────────────────────────
+
+    def _load_policy_calibration(self, backend):
+        """정책이 학습된 LeRobot 캘리브레이션 -> servo별 변환표. 없으면 None.
+
+        ⚠️ 이 노드의 raw 와 정책의 raw 는 같은 물리 자세에서도 값이 다르다.
+        Feetech 는 ``Present_Position = Actual_Position - Homing_Offset`` 이고
+        (lerobot feetech.py `_get_half_turn_homings` 의 docstring), 정책 학습에
+        쓴 LeRobot 캘리브레이션과 지금 서보에 올라간 Homing_Offset 이 다르기
+        때문이다. 두 세계가 같은 팔을 보므로 차이는 관절마다 **상수**이고,
+        그것이 아래 delta 다.
+
+        ⚠️ 기준을 TAUGHT_HOMING_OFFSETS 상수가 아니라 **서보 레지스터 실측값**
+        으로 잡는다. 오프셋은 서보 EEPROM 에 있지 git 에 있지 않아서
+        (_check_taught_calibration 주석), 코드가 뭐라고 적혀 있든 실제로 무엇이
+        올라가 있느냐만이 raw 의 뜻을 정한다. 실측을 쓰면 팔이 이미 LeRobot
+        캘리브레이션을 들고 있을 때 delta 가 저절로 0 이 되고, 교시본을 복원하면
+        저절로 그만큼 붙는다 — 어느 쪽이든 맞는다.
+        """
+        path = str(self.get_parameter("policy_calibration_file").value or "").strip()
+        if not path:
+            self.get_logger().info(
+                "policy_calibration_file 미설정 — ExecuteJointChunk(VLA 재생)는 거부됩니다."
+            )
+            return None
+
+        try:
+            with open(os.path.expanduser(path), encoding="utf-8") as handle:
+                entries = json.load(handle)
+        except (OSError, ValueError) as e:
+            self.get_logger().error(f"정책 캘리브레이션을 읽지 못했습니다({path}): {e}")
+            return None
+
+        table = {}
+        try:
+            for name, entry in entries.items():
+                servo_id = int(entry["id"])
+                low, high = int(entry["range_min"]), int(entry["range_max"])
+                if high <= low:
+                    raise ValueError(f"{name}: range_min({low}) >= range_max({high})")
+                # 단발 읽기로는 안 된다 — 이 버스는 패킷을 이따금 흘린다
+                # (_check_taught_calibration 주석 참고).
+                live = self._read_with_retry(backend.drv.get_homing_offset, servo_id)
+                if live is None:
+                    raise ValueError(f"{name}: servo {servo_id} 의 Homing_Offset 읽기 실패")
+                table[servo_id] = {
+                    "name": name,
+                    "min": low,
+                    "max": high,
+                    "delta": int(entry["homing_offset"]) - int(live),
+                }
+        except (KeyError, TypeError, ValueError) as e:
+            self.get_logger().error(f"정책 캘리브레이션 형식 오류({path}): {e}")
+            return None
+
+        missing = [servo_id for servo_id in ALL_SERVO_IDS if servo_id not in table]
+        if missing:
+            self.get_logger().error(f"정책 캘리브레이션에 servo {missing} 가 없습니다({path})")
+            return None
+
+        summary = ", ".join(
+            f"s{servo_id} {table[servo_id]['delta']:+d}" for servo_id in ALL_SERVO_IDS
+        )
+        self.get_logger().info(f"정책 캘리브레이션 적재({path}) — 좌표계 보정(raw): {summary}")
+        return table
+
+    def _policy_to_taught_raw(self, values):
+        """LeRobot 정규화 값 6개 -> 이 노드의 raw 목표 6개.
+
+        정규화 규칙은 lerobot ``MotorsBus._unnormalize`` 를 그대로 따른다 —
+        servo 1..5 는 DEGREES, servo 6 은 RANGE_0_100 이다
+        (so_follower.py: `use_degrees` 기본값이 True).
+
+        ⚠️ 관절에는 가동범위 클램프를 **일부러 걸지 않는다.** lerobot 도 안 건다
+        (DEGREES 분기에는 bounded_val 이 없다). 여기서만 range_min/max 로 자르면
+        실기로 검증한 롤아웃과 동작이 달라지고, 특히 wrist_roll 은 기록된 범위가
+        14 raw(약 1.2도)뿐이라 사실상 관절이 고정돼 버린다. 절대 한계는 서보의
+        Min/Max_Position_Limit 레지스터가 잡는다 —
+        tools/arm/backup_servo_offsets.py 가 복원하는 그 값이고, 롤아웃이 기대던
+        보호 장치도 같은 것이다. 스텝당 이동량은 호출부의 max_step_deg 가 묶는다.
+        """
+        table = self._policy_calibration
+        goal = {}
+        for servo_id in ALL_SERVO_IDS:
+            entry = table[servo_id]
+            low, high = entry["min"], entry["max"]
+            value = float(values[servo_id - 1])
+            if servo_id == GRIPPER_SERVO_ID:
+                bounded = min(100.0, max(0.0, value))
+                policy_raw = (bounded / 100.0) * (high - low) + low
+            else:
+                mid = (low + high) / 2.0
+                policy_raw = value * STS3215_RESOLUTION_MINUS_1 / 360.0 + mid
+            goal[servo_id] = int(policy_raw) + entry["delta"]
+        return goal
+
+    def _taught_raw_to_policy(self, raw):
+        """이 노드의 raw 6개 -> LeRobot 정규화 값 6개. _policy_to_taught_raw 의 역이다.
+
+        두 방향이 정확히 서로의 역이어야 한다 — 정책은 자기가 낸 명령을 다음
+        관측으로 다시 본다. 한쪽만 어긋나면 정책이 "명령대로 안 갔다"고 읽고
+        같은 방향으로 계속 더 밀어붙인다.
+        """
+        table = self._policy_calibration
+        values = []
+        for servo_id in ALL_SERVO_IDS:
+            entry = table[servo_id]
+            low, high = entry["min"], entry["max"]
+            policy_raw = float(raw[servo_id - 1] - entry["delta"])
+            if servo_id == GRIPPER_SERVO_ID:
+                value = (policy_raw - low) / (high - low) * 100.0
+            else:
+                value = (policy_raw - (low + high) / 2.0) * 360.0 / STS3215_RESOLUTION_MINUS_1
+            values.append(float(value))
+        return values
+
+    def _on_get_policy_state(self, request, response):
+        del request
+        try:
+            if self._policy_calibration is None:
+                raise ValueError("policy_calibration_file 이 없어 정책 좌표계로 못 바꿉니다")
+            backend = soarm._backend(real=True)
+            raw = self._read_joint_positions(backend)
+            if raw is None:
+                raise ArmHardwareUnavailableError("관절 위치 읽기 실패")
+            gripper_raw = backend.drv.get_position(GRIPPER_SERVO_ID)
+            if gripper_raw is None:
+                raise ArmHardwareUnavailableError("그리퍼 위치 읽기 실패")
+            ordered = [raw[servo_id] for servo_id in range(1, 6)] + [gripper_raw]
+            response.positions = self._taught_raw_to_policy(ordered)
+            response.ok = True
+            response.message = ""
+        except ValueError as e:
+            self.get_logger().warn(f"정책 관절 상태 거부: {e}")
+            response.ok = False
+            response.message = str(e)
+        except Exception as e:
+            self.get_logger().error(f"정책 관절 상태 하드웨어 오류: {e}")
+            response.ok = False
+            response.message = str(e)
+        return response
+
+    def _execute_joint_chunk(self, goal_handle):
+        req = goal_handle.request
+        result = ExecuteJointChunk.Result()
+        feedback = ExecuteJointChunk.Feedback()
+        sent = 0
+        try:
+            if self._policy_calibration is None:
+                raise ValueError(
+                    "policy_calibration_file 이 없어 정책 좌표계를 해석할 수 없습니다 — "
+                    "추측해서 재생하면 servo 5 가 약 86도 어긋납니다"
+                )
+            if req.fps <= 0.0:
+                raise ValueError(f"fps 는 양수여야 합니다: {req.fps}")
+            count = len(req.positions)
+            if count == 0 or count % len(ALL_SERVO_IDS) != 0:
+                raise ValueError(f"positions 길이는 6의 배수여야 합니다: {count}")
+            steps = count // len(ALL_SERVO_IDS)
+            if steps > VLA_MAX_STEPS:
+                raise ValueError(f"청크가 너무 깁니다: {steps} 스텝 (상한 {VLA_MAX_STEPS})")
+
+            max_step_deg = (
+                float(req.max_step_deg) if req.max_step_deg > 0.0 else VLA_MAX_STEP_DEG_DEFAULT
+            )
+            max_step_raw = max(1, round(max_step_deg * STS3215_RESOLUTION_MINUS_1 / 360.0))
+
+            self._require_operational_servos(ALL_SERVO_IDS)
+            backend = soarm._backend(real=True)
+
+            # ⚠️ 재생 시작마다 명시적으로 다시 쓴다 — 앞서 무엇이 돌았든
+            # 상관없게(VLA_SPEED_RAW 주석의 2026-09-02 사례).
+            for servo_id in ALL_SERVO_IDS:
+                backend.drv.set_speed(servo_id, VLA_SPEED_RAW)
+                backend.drv.set_acceleration(servo_id, VLA_ACCEL_RAW)
+
+            # 스텝 제한의 기준점은 처음 한 번만 실제로 읽고, 그 뒤로는 우리가
+            # 보낸 목표를 이어 쓴다. 30Hz 재생 중에 매 스텝 서보 6개를 되읽으면
+            # 시리얼이 못 버티고, 늦은 읽기는 그 자체로 궤적을 흔든다.
+            #
+            # 명령을 기준으로 삼는 것이 안전한 이유는 Goal_Velocity 가 0(무제한)
+            # 이라 팔이 뒤처지지 않기 때문이다. 저 값을 묶으면 이 가정이 깨진다.
+            start = self._read_joint_positions(backend)
+            if start is None:
+                raise ArmHardwareUnavailableError("시작 관절 위치 읽기 실패")
+            last = dict(start)
+            gripper_raw = backend.drv.get_position(GRIPPER_SERVO_ID)
+            if gripper_raw is None:
+                raise ArmHardwareUnavailableError("그리퍼 위치 읽기 실패")
+            last[GRIPPER_SERVO_ID] = gripper_raw
+
+            clamped_steps = 0
+            period = 1.0 / float(req.fps)
+            started_at = time.monotonic()
+
+            for step in range(steps):
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    result.ok = False
+                    result.steps_executed = sent
+                    result.message = f"취소됨 — {sent}/{steps} 스텝 재생"
+                    self.get_logger().warn(f"관절 청크 {result.message}")
+                    return result
+
+                offset = step * len(ALL_SERVO_IDS)
+                goal = self._policy_to_taught_raw(req.positions[offset:offset + len(ALL_SERVO_IDS)])
+                step_clamped = False
+                for servo_id in ALL_SERVO_IDS:
+                    move = goal[servo_id] - last[servo_id]
+                    if move > max_step_raw:
+                        goal[servo_id] = last[servo_id] + max_step_raw
+                        step_clamped = True
+                    elif move < -max_step_raw:
+                        goal[servo_id] = last[servo_id] - max_step_raw
+                        step_clamped = True
+                    if not backend.drv.set_position(servo_id, goal[servo_id]):
+                        raise ArmHardwareUnavailableError(
+                            f"servo {servo_id} write 실패 — step {step + 1}/{steps}"
+                        )
+                    last[servo_id] = goal[servo_id]
+                clamped_steps += int(step_clamped)
+                sent = step + 1
+
+                feedback.step = step
+                goal_handle.publish_feedback(feedback)
+
+                # 자기 시계로 재생한다. 스텝마다 period 를 통째로 자면 쓰기에 든
+                # 시간이 누적돼 청크가 요청보다 길어지고, 정책이 가정한 fps 와
+                # 어긋난다.
+                remaining = started_at + (step + 1) * period - time.monotonic()
+                if remaining > 0:
+                    time.sleep(remaining)
+
+            self._require_operational_servos(ALL_SERVO_IDS)
+            elapsed = time.monotonic() - started_at
+            result.ok = True
+            result.steps_executed = sent
+            result.message = (
+                f"{sent} 스텝 재생 {elapsed:.2f}s (요청 {steps / req.fps:.2f}s), "
+                f"스텝 제한 걸린 스텝 {clamped_steps}"
+            )
+            # 제한이 자주 걸렸다는 것은 정책이 max_step_deg 보다 빠르게 움직이려
+            # 했다는 뜻이다 — 궤적이 눌려서 느려지고, 그만큼 정책 의도와 벌어진다.
+            if clamped_steps > steps // 2:
+                self.get_logger().warn(
+                    f"관절 청크: {clamped_steps}/{steps} 스텝이 max_step_deg="
+                    f"{max_step_deg:.1f}도에 걸렸습니다 — 궤적이 눌리고 있습니다"
+                )
+            goal_handle.succeed()
+        except ValueError as e:
+            self.get_logger().warn(f"관절 청크 거부: {e}")
+            result.ok = False
+            result.message = str(e)
+            result.steps_executed = sent
+            goal_handle.abort()
+        except Exception as e:
+            self.get_logger().error(f"관절 청크 하드웨어 오류: {e}")
+            result.ok = False
+            result.message = str(e)
+            result.steps_executed = sent
             goal_handle.abort()
         return result
 
