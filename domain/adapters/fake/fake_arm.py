@@ -19,12 +19,14 @@ class FakeArm(ArmDriver):
         yaw_offset_ok: bool = True,
         reorient_ok: bool = True,
         fold_ok: bool = True,
+        vla_ok: bool = True,
         load_ratio: float | list[float] = LOAD_HOLDING,
     ):
         self._move_ok = move_ok
         self._yaw_offset_ok = yaw_offset_ok
         self._reorient_ok = reorient_ok
         self._fold_ok = fold_ok
+        self._vla_ok = vla_ok
         # get_load()는 GRASP(높을수록 성공)과 HANDOVER(낮을수록 성공)가 정반대
         # 의미로 같이 쓴다 — 상수 하나로는 두 상태를 동시에 성공시킬 수 없어
         # ScriptedPerception.script처럼 호출 순서대로 값을 반환하고, 소진되면
@@ -40,6 +42,14 @@ class FakeArm(ArmDriver):
         # 붙잡기는 안전 경로다 — 복구가 실패했을 때 최소한 이건 불렸는지
         # 테스트가 확인할 수 있어야 한다(2026-08-29).
         self.hold_calls = 0
+        # VLA 백엔드가 실제로 불렸는지 / 어떤 지시문으로 불렸는지.
+        # classic 과 vla 를 가르는 유일한 관측 지점이라 테스트가 본다.
+        self.vla_calls = []
+
+    def run_vla_grasp(self, task: str, timeout_sec: float = 0.0,
+                      max_step_deg: float = 0.0) -> bool:
+        self.vla_calls.append((task, timeout_sec, max_step_deg))
+        return self._vla_ok
 
     def move_to_floor_pose(self, profile: str, stage: str) -> bool:
         self.floor_pose_calls.append((profile, stage))

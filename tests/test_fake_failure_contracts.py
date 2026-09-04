@@ -53,6 +53,15 @@ FAILURE_CONTRACTS = [
     (ArmDriver, "reorient", lambda: FakeArm(reorient_ok=False).reorient(0.0), False, None),
     (ArmDriver, "fold_to_cradle", lambda: FakeArm(fold_ok=False).fold_to_cradle(), False, None),
     (
+        # 정책 노드가 없거나 오류로 끝나면 False — GRASP가 실패로 읽어
+        # APPROACH로 되돌아간다. ⚠️ 반대로 True는 파지 성공이 아니다.
+        ArmDriver,
+        "run_vla_grasp",
+        lambda: FakeArm(vla_ok=False).run_vla_grasp("pick up the rook"),
+        False,
+        "`False`",
+    ),
+    (
         # servo 1이 한계각을 넘는 보정을 거부하면 False — 호출자가 Host에
         # 다시 세워 달라고 넘긴다.
         ArmDriver,

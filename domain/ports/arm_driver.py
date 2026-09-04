@@ -85,6 +85,24 @@ class ArmDriver(ABC):
         무리하게 돌리는 것보다 Host에 다시 세워 달라고 하는 편이 싸다."""
 
     @abstractmethod
+    def run_vla_grasp(self, task: str, timeout_sec: float = 0.0,
+                      max_step_deg: float = 0.0) -> bool:
+        """VLA 정책으로 파지를 수행한다. **실패(서버 부재·오류·취소)는 `False`.**
+
+        ⚠️ `True` 는 "오류 없이 돌았다"이지 **"물체를 집었다"가 아니다.** 정책은
+        자기가 끝났는지 알려주지 않으므로 이 호출만으로는 성공을 알 수 없다.
+        파지 성공 판정은 호출부가 기존 경로와 똑같이 `get_load()` 와
+        `perception.confirm_grasp()` 두 신호로 한다.
+
+        ⚠️ `task` 는 **어느 물체를 집을지 고르지 않는다.** 정책은 그리퍼캠 정면
+        중앙에 있는 것을 집는다 — 학습 데이터에서 목표가 항상 중앙이었기
+        때문이다(2026-09-04 확인: ACT 는 task 를 입력으로 받지도 않고,
+        SmolVLA 는 받지만 효과가 프레임 효과의 10%). 물체 선택은 이 호출
+        **전에** 주행부가 목표를 정면에 놓는 것으로 이뤄진다.
+
+        0 이하의 인자는 노드 기본값을 쓰라는 뜻이다."""
+
+    @abstractmethod
     def hold_position(self) -> None:
         """현재 관절 자세를 그대로 유지한다 (E-STOP 시 파지물 낙하 방지용).
 

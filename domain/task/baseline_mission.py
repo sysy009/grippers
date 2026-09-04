@@ -134,6 +134,15 @@ class BaselinePorts:
     # 구동계 생존 판정의 래치. 워치독과 같은 이유로 여기 한 곳에 둔다 —
     # 상태 객체는 전이마다 새로 만들어지므로 상태를 들고 있을 수 없다.
     base_liveness: LivenessLatch = field(default_factory=LivenessLatch)
+    # 파지 방식. "classic" = 실측 프로필 기반 시퀀스, "vla" = 학습 정책.
+    #
+    # 상태 객체가 아니라 여기 두는 이유는 위 둘과 같다 — 상태는 전이마다 새로
+    # 만들어지므로 설정을 들고 있을 수 없고, 노드가 한 번 정해 주면 미션
+    # 내내 유지돼야 한다.
+    grasp_backend: str = "classic"
+    # vla 백엔드에 넘길 지시문. 정책이 이걸로 물체를 고르지는 않는다
+    # (ArmDriver.run_vla_grasp docstring 참고) — 기록과 SmolVLA 계열을 위한 자리다.
+    vla_task_template: str = "pick up the {label}"
 
 
 # ── 공통 동작 ──────────────────────────────────────────────────────────────
@@ -335,10 +344,19 @@ class BaselineApproachState(State):
 
 
 class BaselineGraspState(State):
-    """파지 수행 (임무 3번).
+    """파지 수행 (임무 3번). 백엔드 두 개를 같은 검증으로 감싼다.
 
-    실기로 검증된 순서를 그대로 따른다 — 벌리고, 내려가고, 물체를 턱 사이로
-    밀어 넣고, 닫고, midpoint에서 부하를 다시 보고, safe를 거쳐 CARRY로 접는다.
+    classic (`ports.grasp_backend == "classic"`, 기본값)
+        실기로 검증된 순서를 그대로 따른다 — 벌리고, 내려가고, 물체를 턱 사이로
+        밀어 넣고, 닫고, midpoint에서 부하를 다시 보고, safe로 올린다.
+
+    vla (`ports.grasp_backend == "vla"`)
+        학습 정책이 뻗기부터 파지까지를 통째로 한다. 미세 전진이 없다 —
+        물체 앞 20cm 까지는 주행부가 데려다 준다.
+
+    **손을 대는 방식만 갈리고 성공 판정은 공통이다.** 부하와 confirm_grasp
+    두 신호를 모두 요구하는 게이트를 양쪽 다 지난다 — 새 경로일수록 기존
+    게이트를 그대로 지나야 한다.
 
     ⚠️ 마지막이 IDLE이 아니라 **CARRY**인 것이 중요하다. 물체를 문 채 IDLE로
     접으면 그리퍼가 라이다 정면을 79% 가려 바구니를 못 본다(2026-08-26 실측,
@@ -356,53 +374,15 @@ class BaselineGraspState(State):
         gp = plan_for_label(self.label)
         ports.base.stop()
 
-        # 전진 거리는 관측에서 나온다 — 상수를 그대로 밀면 이미 가까운 물체를
-        # 턱 안쪽으로 처박는다(grasp_alignment.creep_distance_m 참고).
-        #
-        # 거리를 **팔을 내리기 전에** 확인한다. 모르는 채로 내려가 봐야 그
-        # 자리에서 실패하고 팔만 바닥에 남는다.
-        if self.creep_m is None:
-            return self._failed(ports, "전진 거리를 모른다 — 관측 실패")
-
-        # 정면을 볼 수 있는 마지막 순간이다 — grasp 자세로 내려가면 팔이
-        # 뎁스 카메라를 가린다(tools/demo_rook_run.py 2단계와 같은 이유).
-        ports.perception.remember_target(self.label)
-
-        if not ports.arm.move_to_floor_pose(gp.profile, "safe"):
-            return self._failed(ports, "safe 자세 실패")
-        # 내려가기 전에 연다 — 닫힌 손가락이 물체가 있는 공간을 통과해
-        # 내려가면 물체를 밀어낸다(사용자 지시 2026-08-24).
-        ports.arm.set_gripper(gp.preopen_width_mm)
-        if not ports.arm.move_to_floor_pose(gp.profile, "grasp"):
-            return self._failed(ports, "grasp 자세 실패")
-
-        # ⚠️ 전진은 **팔이 내려가 그리퍼가 열린 뒤**다 (사용자 지시 2026-08-24,
-        # 재확인 2026-08-29). 이 전진의 목적은 "물체 가까이 가는 것"이 아니라
-        # **물체를 벌어진 턱 사이로 밀어 넣는 것**이고, 그래야 평행 턱의 넓은
-        # 목이 좌우 자기정렬 효과를 낸다(grasp_alignment 모듈 docstring).
-        #
-        # 2026-08-29까지 이 호출이 `safe` 앞에 있었다 — 차체가 먼저 가고 팔이
-        # 나중에 내려오는 순서라, 밀어 넣는 것이 아니라 물체 위로 내려가
-        # 감싸는 동작이었고 자기정렬 효과가 없었다. 최초 커밋(241003a) 이후
-        # 아무도 안 건드린 자리인데, 실기로 검증된 tools/demo_rook_run.py 는
-        # 처음부터 이 순서였다(2단계 팔 내리기 -> 3단계 미세 전진).
-        #
-        # ⚠️ 이 구간에서는 **회전이 절대 금지**다. 그리퍼가 바닥에서 2.6cm
-        # 위에 열린 채 떠 있어서, 제자리 회전은 그것을 바닥과 물체를 가로질러
-        # 옆으로 쓴다. `creep_forward` 는 직진만 내므로 계약상 지켜진다 —
-        # 여기에 회전을 섞는 구현으로 바꾸면 안 된다(demo_rook_run.py 의
-        # CREEP_KEYMAP 이 회전 키를 일부러 뺀 것과 같은 이유).
-        if not ports.base.creep_forward(self.creep_m):
-            return self._failed(ports, "미세 전진 실패")
-
-        ports.arm.set_gripper(gp.close_width_mm)
-        load = ports.arm.get_load()
-        lifted = load >= bc.LOAD_THRESHOLD and ports.arm.move_to_floor_pose(
-            gp.profile, "midpoint")
-        held = lifted and ports.arm.get_load() >= bc.LOAD_THRESHOLD
-        cleared = held and ports.arm.move_to_floor_pose(gp.profile, "safe")
-        if not cleared:
-            return self._failed(ports, f"들어 올리지 못함 (부하 {load:.4f})")
+        # 물체에 손을 대는 방식만 백엔드로 갈린다. **그 뒤의 검증은 공통이다** —
+        # 정책이든 실측 시퀀스든 "집었다"의 판정 기준이 달라질 이유가 없고,
+        # 오히려 새 경로일수록 같은 게이트를 지나야 한다.
+        if getattr(ports, "grasp_backend", "classic") == "vla":
+            failure = self._reach_vla(ports, gp)
+        else:
+            failure = self._reach_classic(ports, gp)
+        if failure is not None:
+            return self._failed(ports, failure)
 
         if not ports.arm.move_to_floor_pose(gp.profile, "carry"):
             return self._failed(ports, "CARRY 전환 실패")
@@ -430,6 +410,82 @@ class BaselineGraspState(State):
         ports.host.report(Report.GRASP_DONE, MissionState.CARRY,
                           f"{self.label} 부하 {carried:.4f} · 목표 사라짐 확인")
         return BaselineCarryState(self.label)
+
+    def _reach_vla(self, ports, gp):
+        """학습 정책으로 물체에 손을 댄다. 실패 사유 문자열, 성공이면 None.
+
+        미세 전진(creep)이 없다. 정책은 물체 앞 20cm 에서 뻗어 잡는 것까지를
+        통째로 배웠고, 거기까지 데려다 주는 것은 주행부의 몫이다 — 그래서
+        classic 과 달리 전진 거리를 필요로 하지 않는다.
+
+        ⚠️ 어느 물체를 집을지는 지시문이 정하지 않는다. 정책은 그리퍼캠 정면
+        중앙의 것을 집는다(ArmDriver.run_vla_grasp docstring). label 은
+        기록용이고, 목표를 정면에 놓는 것은 이 상태에 오기 전에 끝나 있어야 한다.
+        """
+        ports.perception.remember_target(self.label)
+        task = ports.vla_task_template.format(label=self.label)
+        if not ports.arm.run_vla_grasp(task):
+            return "VLA 파지 실행 실패"
+        # 정책은 자기가 성공했는지 모른다. safe 로 올리기 전에 부하로 한 번
+        # 거르는 이유는 빈손으로 올려 봐야 아래 공통 검증에서 어차피 걸리고,
+        # 그 사이에 팔만 위로 움직이기 때문이다.
+        load = ports.arm.get_load()
+        if load < bc.LOAD_THRESHOLD:
+            return f"VLA 파지 후 빈손 (부하 {load:.4f})"
+        if not ports.arm.move_to_floor_pose(gp.profile, "safe"):
+            return "safe 자세 실패"
+        return None
+
+    def _reach_classic(self, ports, gp):
+        """실측 프로필 시퀀스로 물체에 손을 댄다. 실패 사유 문자열, 성공이면 None."""
+        # 전진 거리는 관측에서 나온다 — 상수를 그대로 밀면 이미 가까운 물체를
+        # 턱 안쪽으로 처박는다(grasp_alignment.creep_distance_m 참고).
+        #
+        # 거리를 **팔을 내리기 전에** 확인한다. 모르는 채로 내려가 봐야 그
+        # 자리에서 실패하고 팔만 바닥에 남는다.
+        if self.creep_m is None:
+            return "전진 거리를 모른다 — 관측 실패"
+
+        # 정면을 볼 수 있는 마지막 순간이다 — grasp 자세로 내려가면 팔이
+        # 뎁스 카메라를 가린다(tools/demo_rook_run.py 2단계와 같은 이유).
+        ports.perception.remember_target(self.label)
+
+        if not ports.arm.move_to_floor_pose(gp.profile, "safe"):
+            return "safe 자세 실패"
+        # 내려가기 전에 연다 — 닫힌 손가락이 물체가 있는 공간을 통과해
+        # 내려가면 물체를 밀어낸다(사용자 지시 2026-08-24).
+        ports.arm.set_gripper(gp.preopen_width_mm)
+        if not ports.arm.move_to_floor_pose(gp.profile, "grasp"):
+            return "grasp 자세 실패"
+
+        # ⚠️ 전진은 **팔이 내려가 그리퍼가 열린 뒤**다 (사용자 지시 2026-08-24,
+        # 재확인 2026-08-29). 이 전진의 목적은 "물체 가까이 가는 것"이 아니라
+        # **물체를 벌어진 턱 사이로 밀어 넣는 것**이고, 그래야 평행 턱의 넓은
+        # 목이 좌우 자기정렬 효과를 낸다(grasp_alignment 모듈 docstring).
+        #
+        # 2026-08-29까지 이 호출이 `safe` 앞에 있었다 — 차체가 먼저 가고 팔이
+        # 나중에 내려오는 순서라, 밀어 넣는 것이 아니라 물체 위로 내려가
+        # 감싸는 동작이었고 자기정렬 효과가 없었다. 최초 커밋(241003a) 이후
+        # 아무도 안 건드린 자리인데, 실기로 검증된 tools/demo_rook_run.py 는
+        # 처음부터 이 순서였다(2단계 팔 내리기 -> 3단계 미세 전진).
+        #
+        # ⚠️ 이 구간에서는 **회전이 절대 금지**다. 그리퍼가 바닥에서 2.6cm
+        # 위에 열린 채 떠 있어서, 제자리 회전은 그것을 바닥과 물체를 가로질러
+        # 옆으로 쓴다. `creep_forward` 는 직진만 내므로 계약상 지켜진다 —
+        # 여기에 회전을 섞는 구현으로 바꾸면 안 된다(demo_rook_run.py 의
+        # CREEP_KEYMAP 이 회전 키를 일부러 뺀 것과 같은 이유).
+        if not ports.base.creep_forward(self.creep_m):
+            return "미세 전진 실패"
+
+        ports.arm.set_gripper(gp.close_width_mm)
+        load = ports.arm.get_load()
+        lifted = load >= bc.LOAD_THRESHOLD and ports.arm.move_to_floor_pose(
+            gp.profile, "midpoint")
+        held = lifted and ports.arm.get_load() >= bc.LOAD_THRESHOLD
+        cleared = held and ports.arm.move_to_floor_pose(gp.profile, "safe")
+        if not cleared:
+            return f"들어 올리지 못함 (부하 {load:.4f})"
+        return None
 
     def _failed(self, ports, detail):
         """파지 실패 — 팔을 붙잡고 APPROACH로 되돌아가 Host의 판단을 기다린다.

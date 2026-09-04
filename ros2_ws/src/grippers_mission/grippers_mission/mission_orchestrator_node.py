@@ -70,11 +70,24 @@ class MissionOrchestratorNode(Node):
         self.declare_parameter("use_fake_perception", False)
         self.declare_parameter("use_fake_host", False)
         self.declare_parameter("host_ip", "192.168.0.10")
+        # 파지 방식. "classic" = 실측 프로필 시퀀스, "vla" = 학습 정책.
+        #
+        # 기본값이 classic 인 이유: 시연에서 검증된 경로가 그쪽이고, vla 는
+        # vla_inference_node 와 정책 체크포인트가 같이 떠 있어야 동작한다.
+        # 알 수 없는 값이 오면 classic 으로 떨어뜨린다 - 오타 하나로 파지
+        # 경로가 조용히 바뀌는 것보다 낫다.
+        self.declare_parameter("grasp_backend", "classic")
 
         use_fake_base = self.get_parameter("use_fake_base").value
         use_fake_arm = self.get_parameter("use_fake_arm").value
         use_fake_perception = self.get_parameter("use_fake_perception").value
         use_fake_host = self.get_parameter("use_fake_host").value
+        grasp_backend = str(self.get_parameter("grasp_backend").value or "classic").strip()
+        if grasp_backend not in ("classic", "vla"):
+            self.get_logger().warn(
+                f'grasp_backend="{grasp_backend}" 는 모르는 값입니다 - classic 으로 진행합니다')
+            grasp_backend = "classic"
+        self.get_logger().info(f"파지 백엔드: {grasp_backend}")
 
         self._estop = threading.Event()
         self._host = (FakeHostLink() if use_fake_host
@@ -101,6 +114,7 @@ class MissionOrchestratorNode(Node):
             host=self._host,
             lidar=(FakeLidar() if use_fake_perception else Ros2Lidar(self)),
             estop=self._estop,
+            grasp_backend=grasp_backend,
         )
 
         self._started = 0.0

@@ -4,7 +4,12 @@ geometry_msgs/Point 생성자 자리에 그대로 넘기면 rclpy가 필드 타�
 assert로 검사해서 런타임 AssertionError가 난다 — 여기서 필드별로 옮긴다."""
 
 from geometry_msgs.msg import Point
-from grippers_interfaces.action import MoveToCartesian, MoveToFloorPose, ReorientArm
+from grippers_interfaces.action import (
+    MoveToCartesian,
+    MoveToFloorPose,
+    ReorientArm,
+    RunVlaGrasp,
+)
 from grippers_interfaces.srv import GetLoad, OffsetBaseYaw, SetGripper
 from rclpy.action import ActionClient
 from std_srvs.srv import Trigger
@@ -34,6 +39,11 @@ LOAD_UNKNOWN = 0.0
 GRIPPER_TIMEOUT_SEC = 8.0
 BASE_YAW_TIMEOUT_SEC = 8.0
 
+# VLA 파지 결과 상한. 기본 ACTION_RESULT_TIMEOUT_SEC(60초)로는 부족할 수
+# 있다 - 이 액션은 자기 timeout_sec 까지 청크를 계속 재생하고, 노드
+# 기본값이 40초다. 서버 상한보다 넉넉해야 정상 동작을 실패로 끊지 않는다.
+VLA_RESULT_TIMEOUT_SEC = 180.0
+
 
 class Ros2ArmDriver(ArmDriver):
     def __init__(self, node):
@@ -43,6 +53,10 @@ class Ros2ArmDriver(ArmDriver):
             node, MoveToFloorPose, "arm_driver/move_to_floor_pose"
         )
         self._reorient_client = ActionClient(node, ReorientArm, "arm_driver/reorient")
+        # ⚠️ arm_driver 가 아니라 vla_inference_node 가 서버다. 도메인 입장에서는
+        # "팔에게 파지를 시킨다"라 ArmDriver 포트에 두지만, 실제 상대는 다른
+        # 노드다 - 그 노드가 안 떠 있으면 여기서 False 로 떨어진다.
+        self._vla_client = ActionClient(node, RunVlaGrasp, "vla/run_grasp")
         self._gripper_client = node.create_client(SetGripper, "arm_driver/set_gripper")
         self._load_client = node.create_client(GetLoad, "arm_driver/get_load")
         self._fold_client = node.create_client(Trigger, "arm_driver/fold_to_cradle")
@@ -120,6 +134,27 @@ class Ros2ArmDriver(ArmDriver):
         if not res.ok:
             self._node.get_logger().warn(f"offset_base_yaw 거부: {res.message}")
         return res.ok
+
+    def run_vla_grasp(self, task: str, timeout_sec: float = 0.0,
+                      max_step_deg: float = 0.0) -> bool:
+        """정책이 오류 없이 돌았으면 True. 서버 부재·오류·취소는 **False**.
+
+        ⚠️ True 가 파지 성공이 아니다 - 포트 docstring 참고. 호출부가 부하와
+        confirm_grasp 로 따로 판정한다."""
+        goal = RunVlaGrasp.Goal(
+            task=task,
+            timeout_sec=float(timeout_sec),
+            max_step_deg=float(max_step_deg),
+        )
+        result = call_action(
+            self._node, self._vla_client, goal, label="run_vla_grasp",
+            result_timeout_sec=VLA_RESULT_TIMEOUT_SEC,
+        )
+        if result is None:
+            return False
+        if not result.ok:
+            self._node.get_logger().warn(f"run_vla_grasp 실패: {result.message}")
+        return result.ok
 
     def hold_position(self) -> None:
         # stop()과 같은 이유로 응답을 기다리지 않는다 — E-STOP 경로에서 호출되므로
