@@ -24,6 +24,8 @@ PIECE_AIM_YAW_TRIM_DEG` 만큼을 계산에 더해 보정한다.
 
 from __future__ import annotations
 
+import pytest
+
 import math
 import sys
 from pathlib import Path
@@ -52,7 +54,10 @@ def test_트림_상수가_계산된_오차에_그대로_더해진다():
 
     # 기하만 보면 오차는 0(정확히 정북을 보고 있다) — 거기에 트림이
     # 그대로 얹힌다.
-    assert err == mcfg.PIECE_AIM_YAW_TRIM_DEG
+    # ⚠️ 정확 비교를 쓰지 않는다. 각도가 라디안을 거쳐 돌아오고 마지막에
+    # (x + 180) % 360 - 180 을 지나므로 부동소수 오차가 남는다 — 트림이
+    # 5.0(딱 떨어지는 값)일 때는 우연히 통과했지만 6.8 에서 드러났다.
+    assert err == pytest.approx(mcfg.PIECE_AIM_YAW_TRIM_DEG, abs=1e-9)
 
 
 def test_기하로는_허용치_안이어도_트림_때문에_더_돌아야_할_수_있다():
