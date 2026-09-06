@@ -28,6 +28,14 @@ Pi 의 `vla_inference_node` 가 `policy_source:=remote` 로 뜨면 이쪽을 부
     python grippers\\tools\\arm\\policy_server.py \\
       --ckpt grippers\\host\\act_v5_all_180_120k_120000
 
+    DP(확산 정책)는 GPU 가 있어야 한다. 노트북 RTX 3050 기준으로
+    `.venv-dp` 의 파이썬으로 띄운다 — ACT 가 도는 `.venv`(lerobot 0.4.4)로는
+    DP 체크포인트가 안 읽힌다(0.6.x processor 형식):
+
+        .venv-dp/Scripts/python.exe grippers/tools/arm/policy_server.py
+          --ckpt ckpt_dp_v5_all/dp_v5_all_180_60k_060000
+          --device cuda --scheduler DDIM --denoise 25
+
     Pi 쪽 — 기본이 local 이므로 remote 를 **명시해야** 부른다:
     ros2 launch grippers_bringup bringup.launch.py use_vla:=true \\
       policy_source:=remote policy_url:=http://192.168.0.2:8770
@@ -153,13 +161,30 @@ def main() -> None:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--device", default="cpu")
+    # ── 확산 정책 전용 ─────────────────────────────────────────────────
+    # ACT 체크포인트에 주면 아무 일도 안 일어난다(그쪽 config 에 없는 필드다).
+    ap.add_argument("--denoise", type=int, default=None,
+                    help="DP denoising 스텝. 기본은 학습값(100). 줄이면 그만큼 "
+                         "선형으로 빨라지고 궤적이 거칠어진다")
+    ap.add_argument("--scheduler", default=None, choices=("DDPM", "DDIM"),
+                    help="DP 노이즈 스케줄러. 스텝을 줄일 거면 DDIM 이 맞다 — "
+                         "DDPM 은 100스텝을 다 밟으라고 만든 것이다")
     args = ap.parse_args()
 
     print(f"정책 적재 중: {args.ckpt}")
     t0 = time.monotonic()
-    RUNNER = PolicyRunner(args.ckpt, device=args.device)
+    RUNNER = PolicyRunner(args.ckpt, device=args.device,
+                          num_inference_steps=args.denoise,
+                          noise_scheduler_type=args.scheduler)
     print(f"준비 {time.monotonic() - t0:.1f}s — 입력 {RUNNER.policy_hw}, "
-          f"chunk {RUNNER.chunk_size}, n_action_steps {RUNNER.n_action_steps}")
+          f"chunk {RUNNER.chunk_size}, n_action_steps {RUNNER.n_action_steps}, "
+          f"n_obs_steps {RUNNER.n_obs_steps}")
+    if RUNNER.noise_scheduler_type is not None:
+        # 실행 청크가 몇 초인지 같이 찍는다 — 듀티를 사람이 암산 안 하게.
+        chunk_s = RUNNER.n_action_steps / 30.0
+        print(f"확산 정책 — {RUNNER.noise_scheduler_type} "
+              f"{RUNNER.num_inference_steps or '기본(학습값)'} 스텝, "
+              f"실행 청크 {chunk_s:.2f}초. 아래 ms 가 이보다 크면 팔이 끊긴다")
 
     # 워밍업. 첫 호출이 느린 것을 파지 중에 겪지 않게 미리 한 번 돌린다.
     RUNNER.predict_chunk(np.zeros((*RUNNER.policy_hw, 3), np.uint8),
