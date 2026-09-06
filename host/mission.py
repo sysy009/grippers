@@ -961,8 +961,31 @@ class MissionFSM:
             # grippers 저장소 MissionState.GRASP_FORCE 참고). 성공/실패
             # 판정 자체는 Pi 의 기존 두 신호(부하값+뎁스캠 확인) 그대로다.
             status = "GRASP_FORCE" if self._forcing_grasp else "GRASP"
+            # ── 좌우 조준을 servo 1 에 맡긴다 (사용자 지시, 2026-09-06) ──
+            #
+            # 차체 yaw 로는 못 좁힌다. 주행 허용오차가 12도인데(회전이
+            # bang-bang 이라 정지 명령 뒤 관성으로 약 10도를 더 돌아서
+            # 그보다 좁히면 헌팅이 난다 — DRIVE_YAW_TOLERANCE_DEG 주석),
+            # 그리퍼-기물 0.20m 에서 12도면 좌우 42mm 다. VLA 허용치
+            # (±41mm)를 이미 넘는다.
+            #
+            # 그래서 남은 지향 오차를 그대로 실어 보내고 Pi 가 servo 1 로
+            # 흡수한다 — 바구니 투하(PLACE)가 이미 같은 필드로 하는 것과
+            # 같은 방식이다. 부호 뒤집기와 한계 판정은 Pi 쪽에 있다
+            # (baseline_mission._grasp_vla).
+            #
+            # ⚠️ 매 사이클 새로 계산한다. GRASP 진입 시점 값을 얼려 두면
+            # 그사이 차체가 조금이라도 움직였을 때 낡아진다 — 바구니 쪽이
+            # 같은 이유로 매 사이클 계산한다.
+            # _yaw_error_to_target_deg 를 쓴다 — 그 함수가 PIECE_AIM_YAW_
+            # TRIM_DEG 를 더하는 **유일한 지점**이고(그 docstring 참고),
+            # 여기서 따로 계산하면 겨눔과 보정이 서로 다른 오차를 보게 된다.
+            grasp_yaw_correction_deg = 0.0
+            if self._target_xy is not None and pose.ok:
+                grasp_yaw_correction_deg = self._yaw_error_to_target_deg(pose, robot_xy)
             link.send(MissionCommand("stop", status, pose.x, pose.y, pose.yaw_deg,
-                                      target_label=self.target_label))
+                                      target_label=self.target_label,
+                                      yaw_correction_deg=grasp_yaw_correction_deg))
             # poll_status() 는 한 번 물으면 그 응답을 소비한다(다시 물으면
             # IDLE) — 그래서 GRASP_DONE 을 본 뒤로는 다시 안 묻고 그 사실을
             # ready_to_advance 에 붙들어 둔다(수동 모드에서 버튼 누를 때까지

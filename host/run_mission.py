@@ -398,10 +398,28 @@ def _run_mission(args) -> int:
             # 이 한 줄이 그 둘을 가른다. 여러 회차의 전방/좌우 값이 흩어져
             # 있으면 정지 위치 문제이고, 모여 있는데도 실패하면 정책 문제다.
             # 지금까지는 구분할 방법이 없었다.
-            if (_state_before != fsm.state and fsm.state.name == "GRASP"
-                    and _target_before is not None and pose.ok):
-                _dx = _target_before[0] - pose.x
-                _dy = _target_before[1] - pose.y
+            #
+            # ⚠️ 2026-09-06: 이 줄이 두 판 연속 **안 찍혔다.** 조건이
+            # `_target_before is not None` 이었는데, 그 값은 fsm.step() **전**
+            # 스냅샷이라 전환을 만든 그 스텝에서 목표가 정해지면 아직 None
+            # 이다. 진입 순간을 잡으려다 진입 순간을 놓친 셈이다.
+            # step() 뒤 값으로 물러서고, 그래도 없으면 **왜 없는지**를 찍는다 —
+            # 조용히 아무것도 안 나오는 것이 제일 나쁘다.
+            if _state_before != fsm.state and fsm.state.name == "GRASP":
+                _tgt = _target_before if _target_before is not None else fsm._target_xy
+                if _tgt is None or not pose.ok:
+                    print(
+                        f"\n[파지 진입] 오프셋을 못 잽니다 — "
+                        f"목표 {'없음' if _tgt is None else '있음'} · "
+                        f"포즈 {'없음' if not pose.ok else '있음'}\n",
+                        flush=True,
+                    )
+                    _tgt = None
+            else:
+                _tgt = None
+            if _tgt is not None:
+                _dx = _tgt[0] - pose.x
+                _dy = _tgt[1] - pose.y
                 _c = math.cos(math.radians(pose.yaw_deg))
                 _s = math.sin(math.radians(pose.yaw_deg))
                 _fwd = (_dx * _c + _dy * _s) * 1000.0     # 로봇 정면(+) mm
