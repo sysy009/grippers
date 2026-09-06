@@ -33,6 +33,17 @@ from mission import MissionFSM, State                # noqa: E402
 
 from conftest import PiSim                            # noqa: E402
 
+
+# ⚠️ 2026-09-06 사용자 지시로 홈 복귀 기본값이 꺼졌다
+# (mission_config.RETURN_HOME_ENABLED). 이 파일의 시험들은 **켜졌을 때의
+# 동작**을 못 박는 것이라, 여기서만 명시적으로 켠다 — 기본값이 바뀌었다고
+# 검증된 동작의 시험을 지우면, 나중에 다시 켰을 때 아무도 그게 맞는지
+# 모른다.
+@pytest.fixture(autouse=True)
+def _return_home_on(monkeypatch):
+    monkeypatch.setattr(mcfg, "RETURN_HOME_ENABLED", True)
+
+
 MAX_STEPS = 500
 
 

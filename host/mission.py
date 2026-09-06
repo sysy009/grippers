@@ -595,8 +595,10 @@ class MissionFSM:
         return [xy for (xy, _t) in self.skipped]
 
     def _skip_target(self, why: str) -> None:
-        """지금 대상을 보류하고 기본 위치(mcfg.DEFAULT_HOME_XY)로 돌아간 뒤
-        SEARCH_TARGET 으로 돌아간다(2026-09-01 사용자 지시).
+        """지금 대상을 보류하고 다음 라운드로 넘어간다.
+
+        홈 복귀를 거칠지는 `mcfg.RETURN_HOME_ENABLED` 가 정한다(2026-09-06
+        사용자 지시로 기본 꺼짐). 켜 두면 아래 설명대로 동작한다.
 
         SEARCH_TARGET 으로 곧장 돌아가지 않는 이유: 포기하는 자리는 실패한
         기물 코앞이거나 이상한 각도로 서 있을 수 있는 자리다. 그대로 다음
@@ -622,7 +624,30 @@ class MissionFSM:
         self.last_cmd = None
         self._path_planner.reset()
         self._drive.reset()
-        self.state = State.RETURN_HOME
+        self.state = self._next_round_state()
+
+    def _apply_queued_instruction(self) -> None:
+        """포기·투하 사이에 들어온 지시를 여기서 적용한다.
+
+        `set_instruction()` 이 GRASP/GRASP_ALIGN 도 "손이 안 비었다"로 보고
+        큐에 쌓아 두므로(2026-09-01), 라운드가 끝나는 지점마다 한 번씩
+        비워 줘야 한다."""
+        if self._queued_instruction_label is not None:
+            self._instructed_label = self._queued_instruction_label
+            self._instructed_dest_xy = self._queued_instruction_dest_xy
+            self._queued_instruction_label = None
+            self._queued_instruction_dest_xy = None
+
+    def _next_round_state(self) -> "State":
+        """라운드를 끝내고 갈 곳. 홈 복귀를 끄면 그 자리에서 바로 탐색한다.
+
+        ⚠️ 홈 복귀를 건너뛸 때는 큐를 **여기서** 비워야 한다 — 원래는
+        RETURN_HOME 완료 시점이 그 자리였다. 안 비우면 대기 중이던 지시가
+        영영 적용되지 않는다."""
+        if mcfg.RETURN_HOME_ENABLED:
+            return State.RETURN_HOME
+        self._apply_queued_instruction()
+        return State.SEARCH_TARGET
 
     def begin_carrying(self, label: str) -> bool:
         """차량이 이미 `label` 을 들고 있다고 보고 CARRY_TO_DEST 부터 시작한다.
@@ -1798,7 +1823,7 @@ class MissionFSM:
                 self.dest_xy = None
                 self._path_planner.reset()
                 self._drive.reset()
-                self.state = State.RETURN_HOME
+                self.state = self._next_round_state()
 
         elif self.state == State.RETURN_HOME:
             # 기물을 포기한 뒤(_skip_target) 실패한 자리에 그대로 남지 않고
@@ -1821,11 +1846,7 @@ class MissionFSM:
                 # 포기한 기물을 쫓는 동안 새 지시가 들어왔을 수 있다
                 # (set_instruction() 이 GRASP/GRASP_ALIGN 도 "손이 안
                 # 비었다"로 보고 큐에 쌓아 두므로, 2026-09-01).
-                if self._queued_instruction_label is not None:
-                    self._instructed_label = self._queued_instruction_label
-                    self._instructed_dest_xy = self._queued_instruction_dest_xy
-                    self._queued_instruction_label = None
-                    self._queued_instruction_dest_xy = None
+                self._apply_queued_instruction()
                 self.state = State.SEARCH_TARGET
 
         return self.state

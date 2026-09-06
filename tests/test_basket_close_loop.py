@@ -86,15 +86,20 @@ def _run_to_place_done(sim: PiSim, max_steps: int = MAX_STEPS) -> tuple[MissionF
     탐색을 시작하게 함). "바구니 앞에 어떻게 섰는가"를 보는 테스트는 그
     뒤 RETURN_HOME으로 주행해 버린 좌표가 아니라 이 전이 순간의 좌표를
     봐야 한다 — PLACE에서 NUDGE_BOX로 되돌아가는 보정 왕복(정상 동작)과
-    구분하려고, "직전이 PLACE였고 지금이 RETURN_HOME"인 순간만 완료로
-    본다."""
+    구분하려고, "직전이 PLACE였고 지금이 그 다음 라운드"인 순간만 완료로
+    본다.
+
+    ⚠️ 2026-09-06: 다음 라운드가 RETURN_HOME 인지 SEARCH_TARGET 인지는
+    mission_config.RETURN_HOME_ENABLED 가 정한다(사용자 지시로 기본 꺼짐).
+    이 파일은 **바구니 앞에 어떻게 섰는가**를 보는 것이지 그 뒤 어디로
+    가는지를 보는 게 아니므로, 둘 다 완료로 받는다."""
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
     was_place = False
     for n in range(1, max_steps + 1):
         was_place = fsm.state == State.PLACE
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
-        if was_place and fsm.state == State.RETURN_HOME:
+        if was_place and fsm.state in (State.RETURN_HOME, State.SEARCH_TARGET):
             return fsm, n
     pytest.fail(
         f"{max_steps} 사이클 안에 INSERT 를 못 끝냈다 — "
