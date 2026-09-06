@@ -566,7 +566,24 @@ class MissionFSM:
         assert self._target_xy is not None
         desired = math.degrees(math.atan2(self._target_xy[1] - robot_xy[1],
                                           self._target_xy[0] - robot_xy[0]))
-        raw_err = desired - pose.yaw_deg + mcfg.PIECE_AIM_YAW_TRIM_DEG
+        # ⚠️ 2026-09-06 밤: 여기서 트림을 **빼냈다.**
+        #
+        # 트림은 그리퍼·마커의 **고정 장착 오차**다. 그걸 차체 회전으로
+        # 지우려 하면 잘못된 액추에이터를 쓰는 것이다 — 차체 회전은
+        # bang-bang 이라 정지 판정 뒤 관성으로 약 10도를 더 돈다. 트림 6.8도를
+        # 넣자 APPROACH_PIECE 의 정면 게이트(_facing_target, 허용 6도)가
+        # 영영 안 닫혀 GRASP 진입 자체가 막혔다(실기: 626번 주행하고도 팔
+        # 호출 0건).
+        #
+        # 트림 0 일 때 통과하던 이유는, 주행이 끝난 헤딩이 이미 목표를 보고
+        # 있어 게이트가 바로 닫혔기 때문이다. 트림을 넣으면 제자리에서 그만큼
+        # 더 돌아야 하는데, 필요한 정밀도(6도)가 회전 granularity(10도)보다
+        # 작아서 앉지를 못한다.
+        #
+        # 이제 트림은 servo 1 이 흡수한다 — GRASP 가 보내는 yaw_correction_deg
+        # 에 더한다(아래 그 자리 참고). 고정 오차를 미세 액추에이터로 지우는
+        # 것이 원래 맞는 배치다.
+        raw_err = desired - pose.yaw_deg
         return (raw_err + 180.0) % 360.0 - 180.0
 
     def _facing_target(self, pose: Pose, robot_xy: XY) -> bool:
@@ -1005,9 +1022,14 @@ class MissionFSM:
             # _yaw_error_to_target_deg 를 쓴다 — 그 함수가 PIECE_AIM_YAW_
             # TRIM_DEG 를 더하는 **유일한 지점**이고(그 docstring 참고),
             # 여기서 따로 계산하면 겨눔과 보정이 서로 다른 오차를 보게 된다.
+            # ⚠️ 여기에 PIECE_AIM_YAW_TRIM_DEG 를 더한다. 그 트림은
+            # 그리퍼·마커의 고정 장착 오차라 차체가 아니라 servo 1 이
+            # 흡수해야 한다(_yaw_error_to_target_deg 의 2026-09-06 주석).
             grasp_yaw_correction_deg = 0.0
             if self._target_xy is not None and pose.ok:
-                grasp_yaw_correction_deg = self._yaw_error_to_target_deg(pose, robot_xy)
+                grasp_yaw_correction_deg = (
+                    self._yaw_error_to_target_deg(pose, robot_xy)
+                    + mcfg.PIECE_AIM_YAW_TRIM_DEG)
             link.send(MissionCommand("stop", status, pose.x, pose.y, pose.yaw_deg,
                                       target_label=self.target_label,
                                       yaw_correction_deg=grasp_yaw_correction_deg))
