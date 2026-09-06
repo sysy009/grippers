@@ -1082,11 +1082,52 @@ class MissionFSM:
                 self._grasp_yaw_latched = None
                 self._grasp_fail_tries += 1
                 print(f"[mission] {self.target_label} 파지 실패 "
-                      f"{self._grasp_fail_tries}/{mcfg.GRASP_FAIL_MAX_RETRIES}회")
-                if self._grasp_fail_tries >= mcfg.GRASP_FAIL_MAX_RETRIES:
+                      f"{self._grasp_fail_tries}회 "
+                      f"(재시도 상한 {mcfg.GRASP_FAIL_MAX_RETRIES}회)")
+                # ⚠️ `>` 다. `>=` 이면 상수 이름·주석과 어긋난다 —
+                # GRASP_FAIL_MAX_RETRIES 는 "재시도 횟수"이고 주석도 "1 이면
+                # 첫 시도 + 재시도 1회"라고 적고 있는데, `>=` 로는 1일 때
+                # 첫 실패에 곧바로 포기해 재시도가 0회였다(2026-09-06 확인).
+                # 그 탓에 아래 재접근 경로가 영영 안 돌 뻔했다.
+                if self._grasp_fail_tries > mcfg.GRASP_FAIL_MAX_RETRIES:
                     self._skip_target(
                         f"파지 {self._grasp_fail_tries}회 연속 실패")
                     return self.state
+                # ── 재시도는 APPROACH_PIECE 부터 다시 한다 ──────────────
+                #
+                # 사용자 지시(2026-09-06 밤): "파지 실패 후 재시도하는 시퀀스
+                # 사이에 다시 물체의 위치를 찾는 것을 아예 approach 상태로
+                # 바꾸는 게 좋을 거 같아."
+                #
+                # 그 자리에서 GRASP 를 다시 보내면 **실패한 그 자세 그대로**
+                # 또 시도한다. 실패했다는 것은 그 자세가 틀렸다는 뜻이니
+                # 같은 실패를 반복할 뿐이다.
+                #
+                # APPROACH_PIECE 로 돌아가면 (1) 기물 지도에서 지금 보이는
+                # 좌표로 목표를 다시 잡고 (2) 거리·정면 게이트를 처음부터
+                # 다시 통과하며 (3) GRASP 진입 때 조준각을 새로 잰다.
+                #
+                # 목표 좌표를 여기서 갱신하는 이유: self._target_xy 는 대상을
+                # 고를 때 한 번 박아 둔 값이라, 물체가 파지 시도에 밀렸으면
+                # 낡았다. 같은 라벨이 지금 어디 보이는지로 바꿔 준다 —
+                # 안 보이면 옛 좌표를 그대로 두고 가서 거기서 다시 본다.
+                if self.target_label is not None and self._target_xy is not None:
+                    seen = piece_map.get(self.target_label) or []
+                    if seen:
+                        nearest = min(seen, key=lambda xy: math.hypot(
+                            xy[0] - self._target_xy[0], xy[1] - self._target_xy[1]))
+                        moved_mm = math.hypot(nearest[0] - self._target_xy[0],
+                                              nearest[1] - self._target_xy[1]) * 1000.0
+                        if moved_mm >= 1.0:
+                            print(f"[mission] {self.target_label} 위치 갱신 "
+                                  f"{moved_mm:.0f}mm 이동 — 다시 접근합니다", flush=True)
+                        self._target_xy = nearest
+                self.ready_to_advance = False
+                self._tight_yaw_gate = True     # 재접근은 정면을 확실히 맞춘다
+                self._path_planner.reset()
+                self._drive.reset()
+                self.state = State.APPROACH_PIECE
+                return self.state
 
             # Pi 가 "조건이 안 맞는다, 수정된 명령을 달라"고 했으면 재정렬로
             # 넘어간다. 여기서 아무것도 안 하면 Pi 는 계속 기다리고 Host 는

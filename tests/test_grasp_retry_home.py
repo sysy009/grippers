@@ -79,16 +79,27 @@ def _run_until(fsm, link, predicate, max_steps=MAX_STEPS):
 # ── GRASP_FAIL_MAX_RETRIES ──────────────────────────────────────────────
 
 
-def test_상한_전에는_그대로_재시도한다():
-    """GRASP_FAIL_MAX_RETRIES 를 채우기 전엔 계속 GRASP 상태에 머문다."""
+def test_상한_전_실패는_APPROACH_PIECE_로_되돌아간다():
+    """⚠️ 2026-09-06 밤에 바뀌었다 — 예전에는 GRASP 에 머물러 그 자리에서
+    다시 시도했다.
+
+    사용자 지시: "파지 실패 후 재시도하는 시퀀스 사이에 다시 물체의 위치를
+    찾는 것을 아예 approach 상태로 바꾸는 게 좋을 거 같아."
+
+    실패했다는 것은 그 자세가 틀렸다는 뜻이라, 같은 자리에서 GRASP 를 다시
+    보내면 같은 실패를 반복한다. APPROACH_PIECE 로 돌아가면 목표 좌표를
+    다시 읽고, 거리·정면 게이트를 다시 통과하고, 조준각을 새로 잰다."""
     fsm = MissionFSM()
     _begin_grasp(fsm)
     link = AlwaysFailPi()
 
-    for _ in range(mcfg.GRASP_FAIL_MAX_RETRIES - 1):
-        fsm.step(link.pose(), {}, link)
-        assert fsm.state == State.GRASP
-    assert fsm._grasp_fail_tries == mcfg.GRASP_FAIL_MAX_RETRIES - 1
+    fsm.step(link.pose(), {}, link)
+
+    assert fsm.state == State.APPROACH_PIECE
+    assert fsm._grasp_fail_tries == 1
+    assert fsm.target_label is not None, "아직 포기하면 안 된다"
+    # 다음 파지 진입에서 조준각을 새로 재도록 래치가 풀려 있어야 한다.
+    assert fsm._grasp_yaw_latched is None
 
 
 def test_반복적_물리_실패는_상한에서_포기하고_기본_위치로_향한다():
@@ -98,7 +109,10 @@ def test_반복적_물리_실패는_상한에서_포기하고_기본_위치로_�
 
     _run_until(fsm, link, lambda f: f.state == State.RETURN_HOME)
 
-    assert fsm._grasp_fail_tries == mcfg.GRASP_FAIL_MAX_RETRIES
+    # ⚠️ 상수는 "재시도 횟수"이므로 포기까지의 실패 횟수는 그보다 하나 많다
+    # (첫 시도 + 재시도 N회). 2026-09-06 이전에는 비교가 `>=` 라 1 일 때
+    # 재시도가 0회였다 — 이름·주석과 어긋나 있었다.
+    assert fsm._grasp_fail_tries == mcfg.GRASP_FAIL_MAX_RETRIES + 1
     assert fsm.target_label is None
     assert len(fsm.skipped) == 1
 
