@@ -68,9 +68,16 @@ def _begin_grasp(fsm: MissionFSM) -> None:
     fsm.dest_xy = (1.271, 1.30)
 
 
-def _run_until(fsm, link, predicate, max_steps=MAX_STEPS):
+#: 파지 실패 재시도는 상태를 리셋하고 SEARCH_TARGET 부터 다시 한다
+#: (2026-09-06). 그러니 재시도가 진행되려면 그 기물이 화면에 **계속 보여야**
+#: 한다 — 빈 지도({})를 주면 리셋 뒤 찾을 대상이 없어 SEARCH_TARGET 에서
+#: 그냥 대기한다(그게 "기물이 없을 때"의 정상 동작이다).
+_ROOK_VISIBLE = {"rook": [(1.0, 0.6)]}
+
+
+def _run_until(fsm, link, predicate, max_steps=MAX_STEPS, piece_map=_ROOK_VISIBLE):
     for n in range(1, max_steps + 1):
-        fsm.step(link.pose(), {}, link)
+        fsm.step(link.pose(), piece_map, link)
         if predicate(fsm):
             return n
     pytest.fail(f"{max_steps} 사이클 안에 조건에 도달하지 못했다 — 상태 {fsm.state.name}")
@@ -79,27 +86,34 @@ def _run_until(fsm, link, predicate, max_steps=MAX_STEPS):
 # ── GRASP_FAIL_MAX_RETRIES ──────────────────────────────────────────────
 
 
-def test_상한_전_실패는_APPROACH_PIECE_로_되돌아간다():
+def test_상한_전_실패는_상태를_리셋하고_처음부터_다시_찾는다():
     """⚠️ 2026-09-06 밤에 바뀌었다 — 예전에는 GRASP 에 머물러 그 자리에서
     다시 시도했다.
 
-    사용자 지시: "파지 실패 후 재시도하는 시퀀스 사이에 다시 물체의 위치를
-    찾는 것을 아예 approach 상태로 바꾸는 게 좋을 거 같아."
+    사용자 지시가 두 번에 걸쳐 좁혀졌다. 먼저 "재시도 사이에 물체 위치를
+    다시 찾게 approach 상태로", 그다음 "approach 로 가는 것보다 상태를
+    아예 reset 하는 게 더 좋겠다".
 
-    실패했다는 것은 그 자세가 틀렸다는 뜻이라, 같은 자리에서 GRASP 를 다시
-    보내면 같은 실패를 반복한다. APPROACH_PIECE 로 돌아가면 목표 좌표를
-    다시 읽고, 거리·정면 게이트를 다시 통과하고, 조준각을 새로 잰다."""
+    APPROACH_PIECE 로만 되돌리면 대상 라벨과 정렬·강제파지 카운터가 실패한
+    시도의 상태를 그대로 물고 간다. SEARCH_TARGET 부터 다시 하면 기물
+    지도에서 지금 보이는 것으로 대상을 새로 고르고 카운터가 0 에서
+    시작한다."""
     fsm = MissionFSM()
     _begin_grasp(fsm)
     link = AlwaysFailPi()
 
     fsm.step(link.pose(), {}, link)
 
-    assert fsm.state == State.APPROACH_PIECE
+    assert fsm.state == State.SEARCH_TARGET
+    # ⚠️ 실패 횟수만은 살아남아야 한다 — 지우면 실패-리셋-실패로 영원히 돈다.
     assert fsm._grasp_fail_tries == 1
-    assert fsm.target_label is not None, "아직 포기하면 안 된다"
-    # 다음 파지 진입에서 조준각을 새로 재도록 래치가 풀려 있어야 한다.
+    # 나머지는 초기화된다.
+    assert fsm.target_label is None
     assert fsm._grasp_yaw_latched is None
+    assert fsm._forcing_grasp is False
+    # 아직 포기가 아니므로 skipped 에 넣지 않는다 — 넣으면 SEARCH_TARGET 이
+    # 같은 기물을 다시 못 고른다.
+    assert fsm.skipped == []
 
 
 def test_반복적_물리_실패는_상한에서_포기하고_기본_위치로_향한다():

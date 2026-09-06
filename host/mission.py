@@ -502,6 +502,12 @@ class MissionFSM:
         # (mcfg.GRASP_FAIL_MAX_RETRIES, 2026-09-01 사용자 지시). GRASP_BLOCKED
         # 는 위 align_tries/forcing 쪽이 이미 상한을 관리하므로 겹치지 않는다.
         self._grasp_fail_tries = 0
+        # 그 카운터가 **어느 대상** 것인지. 파지 실패 재시도가 상태를 통째로
+        # 리셋하면서 target_label 을 지우기 때문에, 라벨만으로는 "새 대상"과
+        # "같은 대상 재시도"를 구분할 수 없다 — 구분 못 하면 대상 선택 시점의
+        # 초기화가 카운터를 0 으로 되돌려 **무한 재시도**가 된다
+        # (2026-09-06, 테스트가 잡았다: "실패 1회"만 영원히 반복).
+        self._grasp_fail_for: Optional[tuple[str, XY]] = None
         self._grasp_yaw_latched = None
         # 재정렬/파지를 다 쓰고도 못 집은 기물 좌표. 다른 후보가 남아 있는
         # 동안은 SEARCH_TARGET 후보에서 뺀다 — 단 그것 말고 후보가 하나도
@@ -631,11 +637,33 @@ class MissionFSM:
         if self._target_xy is not None:
             self.skipped.append((self._target_xy, time.monotonic()))
         print(f"[mission] {self.target_label} 보류: {why} — 기본 위치로 복귀합니다")
+        self._reset_for_next_target()
+        self.state = self._next_round_state()
+
+    def _reset_for_next_target(self) -> None:
+        """대상 하나를 끝내고(또는 포기하고) 다음으로 넘어가기 전 초기화.
+
+        상태(self.state)는 **안 건드린다** — 어디로 갈지는 호출부가 정한다.
+        `_skip_target`(포기)과 파지 실패 재시도(같은 기물을 처음부터 다시)가
+        같은 초기화를 쓰되 목적지만 다르기 때문이다.
+
+        ⚠️ `skipped` 와 `_grasp_fail_tries` 는 여기서 안 지운다. 둘 다
+        "이 대상을 얼마나 시도했는가"를 들고 있어서, 지우면 실패-리셋-실패로
+        영원히 돈다."""
         self._align = None
         self._align_from = None
         self._align_sweep_stage = None
         self._align_sweep_phase_start = None
         self._align_sweep_burst_until = None
+        self._align_tries = 0
+        self._reaim_tries = 0
+        self._align_reaim_backoff = False
+        self._forcing_grasp = False
+        self._forced_grasp_tries = 0
+        self._replan_tries = 0
+        self._replan_backoff_xy = None
+        self._tight_yaw_gate = False
+        self._grasp_yaw_latched = None
         self.target_label = None
         self._target_xy = None
         self.dest_xy = None
@@ -645,7 +673,6 @@ class MissionFSM:
         self.last_cmd = None
         self._path_planner.reset()
         self._drive.reset()
-        self.state = self._next_round_state()
 
     def _apply_queued_instruction(self) -> None:
         """포기·투하 사이에 들어온 지시를 여기서 적용한다.
@@ -932,7 +959,18 @@ class MissionFSM:
                     self._align_tries_at_last_replan = None
                     self._tight_yaw_gate = False
                     self._replan_backoff_xy = None
-                    self._grasp_fail_tries = 0
+                    # ⚠️ 정말 **다른** 대상일 때만 파지 실패 카운터를 지운다.
+                    # 파지 실패 재시도는 같은 기물을 리셋 후 다시 고르는
+                    # 경로라, 여기서 무조건 0 으로 되돌리면 상한이 영영
+                    # 안 차서 무한 루프가 된다.
+                    same = (self._grasp_fail_for is not None
+                            and self._grasp_fail_for[0] == label
+                            and math.hypot(self._grasp_fail_for[1][0] - xy[0],
+                                           self._grasp_fail_for[1][1] - xy[1])
+                            <= mcfg.PIECE_MERGE_DIST_M)
+                    if not same:
+                        self._grasp_fail_tries = 0
+                        self._grasp_fail_for = None
                     self._grasp_yaw_latched = None
                     self._path_planner.reset()   # 새 구간 시작
                     self._drive.reset()
@@ -1081,6 +1119,7 @@ class MissionFSM:
                 # 새로 잰다. 팔은 이미 접혀 있어 마커가 깨끗하다.
                 self._grasp_yaw_latched = None
                 self._grasp_fail_tries += 1
+                self._grasp_fail_for = (self.target_label, self._target_xy)
                 print(f"[mission] {self.target_label} 파지 실패 "
                       f"{self._grasp_fail_tries}회 "
                       f"(재시도 상한 {mcfg.GRASP_FAIL_MAX_RETRIES}회)")
@@ -1093,40 +1132,29 @@ class MissionFSM:
                     self._skip_target(
                         f"파지 {self._grasp_fail_tries}회 연속 실패")
                     return self.state
-                # ── 재시도는 APPROACH_PIECE 부터 다시 한다 ──────────────
+                # ── 재시도는 **상태를 통째로 리셋**하고 처음부터 ──────────
                 #
-                # 사용자 지시(2026-09-06 밤): "파지 실패 후 재시도하는 시퀀스
-                # 사이에 다시 물체의 위치를 찾는 것을 아예 approach 상태로
-                # 바꾸는 게 좋을 거 같아."
+                # 사용자 지시(2026-09-06 밤): "approach 상태로 가는 것보다
+                # 상태를 아예 reset 하는 게 더 좋을 거 같아."
                 #
-                # 그 자리에서 GRASP 를 다시 보내면 **실패한 그 자세 그대로**
-                # 또 시도한다. 실패했다는 것은 그 자세가 틀렸다는 뜻이니
-                # 같은 실패를 반복할 뿐이다.
+                # 처음에는 APPROACH_PIECE 로만 되돌렸는데, 그러면 대상 라벨과
+                # 정렬·강제파지 카운터 같은 것이 실패한 시도의 상태를 그대로
+                # 물고 간다. SEARCH_TARGET 부터 다시 하면 기물 지도에서 지금
+                # 보이는 것으로 대상을 새로 고르고, 모든 카운터가 0 에서
+                # 시작한다.
                 #
-                # APPROACH_PIECE 로 돌아가면 (1) 기물 지도에서 지금 보이는
-                # 좌표로 목표를 다시 잡고 (2) 거리·정면 게이트를 처음부터
-                # 다시 통과하며 (3) GRASP 진입 때 조준각을 새로 잰다.
+                # skipped 에는 **안 넣는다** — 그건 포기할 때 쓰는 것이고,
+                # 여기는 아직 재시도가 남은 경우다. 안 넣어야 SEARCH_TARGET
+                # 이 같은 기물을 다시 고른다.
                 #
-                # 목표 좌표를 여기서 갱신하는 이유: self._target_xy 는 대상을
-                # 고를 때 한 번 박아 둔 값이라, 물체가 파지 시도에 밀렸으면
-                # 낡았다. 같은 라벨이 지금 어디 보이는지로 바꿔 준다 —
-                # 안 보이면 옛 좌표를 그대로 두고 가서 거기서 다시 본다.
-                if self.target_label is not None and self._target_xy is not None:
-                    seen = piece_map.get(self.target_label) or []
-                    if seen:
-                        nearest = min(seen, key=lambda xy: math.hypot(
-                            xy[0] - self._target_xy[0], xy[1] - self._target_xy[1]))
-                        moved_mm = math.hypot(nearest[0] - self._target_xy[0],
-                                              nearest[1] - self._target_xy[1]) * 1000.0
-                        if moved_mm >= 1.0:
-                            print(f"[mission] {self.target_label} 위치 갱신 "
-                                  f"{moved_mm:.0f}mm 이동 — 다시 접근합니다", flush=True)
-                        self._target_xy = nearest
-                self.ready_to_advance = False
-                self._tight_yaw_gate = True     # 재접근은 정면을 확실히 맞춘다
-                self._path_planner.reset()
-                self._drive.reset()
-                self.state = State.APPROACH_PIECE
+                # 재시도 상한(_grasp_fail_tries)은 일부러 안 지운다. 그걸
+                # 지우면 실패-리셋-실패로 영원히 돈다.
+                tries, owner = self._grasp_fail_tries, self._grasp_fail_for
+                self._reset_for_next_target()
+                self._grasp_fail_tries, self._grasp_fail_for = tries, owner
+                print(f"[mission] 상태를 리셋하고 처음부터 다시 찾습니다 "
+                      f"(실패 {tries}회)", flush=True)
+                self.state = State.SEARCH_TARGET
                 return self.state
 
             # Pi 가 "조건이 안 맞는다, 수정된 명령을 달라"고 했으면 재정렬로
