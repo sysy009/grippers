@@ -609,7 +609,23 @@ GRASP_REAIM_ESCALATE_AFTER_TRIES = 3
 GRASP_REPLAN_AFTER_TRIES = 3
 GRASP_REPLAN_BACKOFF_M = 0.15          # GRASP_TRIGGER_DIST_M 보다 이만큼 더 물러난다
 GRASP_REPLAN_ARRIVE_TOL_M = 0.05       # 물러난 지점 도착 판정 여유
-GRASP_REPLAN_YAW_TOLERANCE_DEG = 6.0   # DRIVE_YAW_TOLERANCE_DEG(12도)보다 타이트하게
+# ⚠️ 2026-09-06 밤에 6.0 -> 8.0 으로 넓혔다 (사용자 지시).
+#
+# 원래 설계 의도가 이거였다 — "탑뷰 기준으로 물건과 차가 근처까지 가면
+# **잔잔한 yaw 회전을 하는 게 아니라** 물체를 잡기 위해 1번 모터를
+# 회전시켜라". 그런데 구현이 둘 다 하고 있었다: 차체가 6도 창에 들어오려고
+# 제자리 겨눔을 반복하고, 그 위에 servo 1 보정이 또 얹혔다.
+#
+# 차체 회전은 bang-bang 이라 정지 판정 뒤 관성으로 약 10도를 더 돈다 —
+# 6도 창을 노리면 앉지를 못하고 매번 다른 자세로 끝난다. 그러면 servo 1 이
+# 흡수해야 할 잔여도 시도마다 달라져서, 사용자가 본 "미세하게 바뀌는
+# 1번 모터"가 된다.
+#
+# 8.0 은 servo 1 이 흡수할 수 있는 한계(grasp_alignment.VLA_PAN_LIMIT_DEG)와
+# 같은 값이다. **차체는 servo 1 이 감당할 수 있는 데까지만 맞추고 손을
+# 뗀다** — 그 안쪽 정밀 조준은 servo 1 몫이다. 역할 경계를 한 숫자로
+# 맞춰 두면 나중에 한쪽만 고쳐서 어긋나는 일이 없다.
+GRASP_REPLAN_YAW_TOLERANCE_DEG = 8.0   # = VLA_PAN_LIMIT_DEG (servo 1 흡수 한계)
 GRASP_REPLAN_MAX_ATTEMPTS = 2          # 그래도 안 되면 원래 예산(GRASP_FORCE 등)으로
 
 # 겨눔이 기하학적으로는 "다 됐다"(오차 0, 허용치 안)고 판정해도, 실제로는
