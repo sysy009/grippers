@@ -26,6 +26,20 @@ from vehicle_link import RE_AIM, GraspCorrection      # noqa: E402
 
 from conftest import PiSim                            # noqa: E402
 
+
+# ⚠️ 2026-09-07 사용자 지시로 mission_config.VLA_GRASP_ONLY 기본값이 True 가
+# 됐다. 그러면 Host 의 파지 재시도 사다리(GRASP_ALIGN·GRASP_REPLAN·
+# GRASP_FORCE·재시도 상한)가 통째로 꺼진다 — 실패하면 상태를 리셋하고
+# SEARCH_TARGET 부터 다시 할 뿐이다.
+#
+# 이 파일의 시험들은 **그 사다리가 켜졌을 때의 계약**을 못 박는 것이라
+# 여기서만 명시적으로 되살린다. 기본값이 바뀌었다고 검증된 동작의 시험을
+# 지우면, 나중에 다시 켰을 때 아무도 그게 맞는지 모른다(같은 저장소의
+# test_grasp_retry_home.py 가 RETURN_HOME_ENABLED 에 쓴 것과 같은 방식).
+@pytest.fixture(autouse=True)
+def _grasp_ladder_on(monkeypatch):
+    monkeypatch.setattr(mcfg, "VLA_GRASP_ONLY", False)
+
 # 실기 재현과 무관한 순수 정렬 반복이라 임의의 값을 쓴다 — 핵심은 "매번
 # 같은 재회전 요구가 온다"는 것뿐이다.
 _STUCK_CORRECTION = GraspCorrection(RE_AIM, "턱 폭 밖", lateral_mm=95.0)

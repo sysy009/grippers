@@ -1128,7 +1128,8 @@ class MissionFSM:
                 # 첫 시도 + 재시도 1회"라고 적고 있는데, `>=` 로는 1일 때
                 # 첫 실패에 곧바로 포기해 재시도가 0회였다(2026-09-06 확인).
                 # 그 탓에 아래 재접근 경로가 영영 안 돌 뻔했다.
-                if self._grasp_fail_tries > mcfg.GRASP_FAIL_MAX_RETRIES:
+                if (not mcfg.VLA_GRASP_ONLY
+                        and self._grasp_fail_tries > mcfg.GRASP_FAIL_MAX_RETRIES):
                     self._skip_target(
                         f"파지 {self._grasp_fail_tries}회 연속 실패")
                     return self.state
@@ -1151,7 +1152,12 @@ class MissionFSM:
                 # 지우면 실패-리셋-실패로 영원히 돈다.
                 tries, owner = self._grasp_fail_tries, self._grasp_fail_for
                 self._reset_for_next_target()
-                self._grasp_fail_tries, self._grasp_fail_for = tries, owner
+                if not mcfg.VLA_GRASP_ONLY:
+                    # 예전 경로: 상한을 세야 하므로 카운터를 살려 둔다.
+                    self._grasp_fail_tries, self._grasp_fail_for = tries, owner
+                else:
+                    # VLA 전용: "재시도"라는 개념이 없다. 매번 처음부터다.
+                    self._grasp_fail_tries, self._grasp_fail_for = 0, None
                 print(f"[mission] 상태를 리셋하고 처음부터 다시 찾습니다 "
                       f"(실패 {tries}회)", flush=True)
                 self.state = State.SEARCH_TARGET
@@ -1162,6 +1168,13 @@ class MissionFSM:
             # 계속 GRASP 를 보내서 영원히 멈춰 있다 — Pi 의 계약이 "스스로
             # 고쳐서 진행하지 않는다"이므로 움직이는 쪽은 Host 뿐이다.
             correction = link.take_correction()
+            if mcfg.VLA_GRASP_ONLY:
+                # ⚠️ 팀원 브랜치의 파지 재시도 사다리(GRASP_ALIGN·GRASP_REPLAN
+                # ·GRASP_FORCE)를 여기서 끊는다. 셋 다 Pi 의 뎁스 정렬 판정을
+                # 전제로 하는데 지금 구성에서는 Pi 가 그 판정을 아예 안 한다
+                # (mission_config.VLA_GRASP_ONLY 주석). 보정이 와도 버린다 —
+                # 파지 성패는 정책과 그리퍼 위치 판정만으로 가린다.
+                correction = None
             if correction is not None and not self.ready_to_advance:
                 # 이미 실제 파지(팔 내려가 그리퍼 닫기)를 한 번 이상
                 # 시도한 뒤에 "정면에서 못 찾음"(BACK_OFF)이 왔다면,
