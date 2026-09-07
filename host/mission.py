@@ -648,6 +648,27 @@ class MissionFSM:
         self._reset_for_next_target()
         self.state = self._next_round_state()
 
+    def _restart_mission(self) -> None:
+        """**처음 켠 상태로 되돌린다** (사용자 지시, 2026-09-07).
+
+        "집기 이후의 실패 시에 물건 찾기로 돌아간다기보다 상황이 전체적으로
+        아예 초기화되어서 처음부터 다시 진행하는 방식으로 하는 게 좋겠다."
+
+        `_reset_for_next_target` 은 대상과 조준 관련만 지운다 — 주행
+        시퀀서·경로 계획기·바구니 접근 상태·보류 목록·투하 목적지는 실패한
+        시도의 흔적을 그대로 물고 간다. 그것들이 남아 있으면 "처음부터"가
+        아니라 "이어서"가 된다.
+
+        새 FSM 을 하나 만들어 그 상태를 통째로 덮어쓴다. 필드를 손으로
+        나열하지 않는 이유는 **나중에 필드가 늘어도 안 새기 때문**이다 —
+        목록을 적어 두면 새 상태가 추가될 때마다 조용히 빠진다.
+
+        생성자가 받는 것은 manual_mode 와 category 뿐이고 외부 객체를 들고
+        있지 않아, 이 방식으로 잃는 참조가 없다.
+        """
+        fresh = MissionFSM(manual_mode=self.manual_mode, category=self.category)
+        self.__dict__.update(vars(fresh))
+
     def _reset_for_next_target(self) -> None:
         """대상 하나를 끝내고(또는 포기하고) 다음으로 넘어가기 전 초기화.
 
@@ -1181,14 +1202,16 @@ class MissionFSM:
                 # 재시도 상한(_grasp_fail_tries)은 일부러 안 지운다. 그걸
                 # 지우면 실패-리셋-실패로 영원히 돈다.
                 tries, owner = self._grasp_fail_tries, self._grasp_fail_for
-                self._reset_for_next_target()
-                if not mcfg.VLA_GRASP_ONLY:
-                    # 예전 경로: 상한을 세야 하므로 카운터를 살려 둔다.
-                    self._grasp_fail_tries, self._grasp_fail_for = tries, owner
+                if mcfg.VLA_GRASP_ONLY:
+                    # ⚠️ 대상만 지우는 게 아니라 **처음 켠 상태로** 되돌린다
+                    # (사용자 지시 2026-09-07). 주행 시퀀서·경로 계획기·
+                    # 바구니 접근 상태까지 실패한 시도의 흔적을 안 물고 간다.
+                    self._restart_mission()
                 else:
-                    # VLA 전용: "재시도"라는 개념이 없다. 매번 처음부터다.
-                    self._grasp_fail_tries, self._grasp_fail_for = 0, None
-                print(f"[mission] 상태를 리셋하고 처음부터 다시 찾습니다 "
+                    # 예전 경로: 상한을 세야 하므로 카운터를 살려 둔다.
+                    self._reset_for_next_target()
+                    self._grasp_fail_tries, self._grasp_fail_for = tries, owner
+                print(f"[mission] 상태를 처음부터 다시 시작합니다 "
                       f"(실패 {tries}회)", flush=True)
                 self.state = State.SEARCH_TARGET
                 return self.state

@@ -198,3 +198,75 @@ def test_어떤_재시도_카운터도_안_움직인다():
         assert all(v == 0 for v in counters.values()), f"{link_cls.__name__}: {counters}"
         assert fsm._forcing_grasp is False
         assert fsm.skipped == []
+
+
+# ── 실패하면 처음 켠 상태로 (2026-09-07) ──────────────────────────────────
+#
+# "집기 이후의 실패 시에 물건 찾기로 돌아간다기보다 상황이 전체적으로 아예
+#  초기화되어서 처음부터 다시 진행하는 방식으로 하는 게 좋겠다."
+#
+# _reset_for_next_target 은 대상·조준만 지운다. 주행 시퀀서, 경로 계획기,
+# 바구니 접근 상태, 보류 목록, 투하 목적지는 실패한 시도의 흔적을 그대로
+# 물고 갔다 — 그러면 "처음부터"가 아니라 "이어서"다.
+
+
+def test_실패하면_새로_만든_FSM_과_구별되지_않는다():
+    """⚠️ 필드를 하나씩 확인하지 않는다 — 목록을 적어 두면 새 상태가
+    추가될 때 조용히 빠진다. 갓 만든 FSM 과 통째로 비교한다."""
+    fsm = _fsm_in_grasp()
+    link = AlwaysFailPi()
+
+    # 실패한 시도의 흔적을 여기저기 남겨 둔다
+    fsm.dest_xy = (1.271, 1.30)
+    fsm.dest_box_name = "chess"
+    fsm.skipped = [((0.5, 0.5), 123.0)]
+    fsm._reaim_tries = 2
+    fsm._align_tries = 4
+    fsm.last_cmd = "yaw+"
+    fsm.nav_goal = (0.9, 0.9)
+
+    fsm.step(PiSim().pose(), {}, link)
+
+    fresh = MissionFSM()
+    dirty = {k: (v, vars(fresh).get(k)) for k, v in vars(fsm).items()
+             if k not in ("_drive", "_path_planner", "_drive_stall")
+             and repr(v) != repr(vars(fresh).get(k))}
+    assert not dirty, f"초기화 안 된 필드: {sorted(dirty)}"
+
+
+def test_주행_시퀀서와_경로_계획기도_새것이_된다():
+    """이것들은 값 비교가 안 되는 객체라 위 시험에서 제외했다 — 대신
+    **다른 객체로 갈렸는지**를 본다. 같은 객체가 남아 있으면 지난 시도의
+    회전 이력·경로가 그대로 이어진다."""
+    fsm = _fsm_in_grasp()
+    before = (id(fsm._drive), id(fsm._path_planner), id(fsm._drive_stall))
+
+    fsm.step(PiSim().pose(), {}, AlwaysFailPi())
+
+    after = (id(fsm._drive), id(fsm._path_planner), id(fsm._drive_stall))
+    assert before != after, "같은 객체를 계속 쓰면 지난 시도의 상태가 남는다"
+
+
+def test_실행_내내_유지되어야_할_것은_안_지운다():
+    """category 는 `--category chess` 처럼 실행 내내 붙는 필터다. 이것까지
+    지우면 실패 한 번에 사용자가 준 조건이 사라진다."""
+    fsm = MissionFSM(manual_mode=True, category="toy")
+    fsm.state = State.GRASP
+    fsm.target_label = "soccer"
+    fsm._target_xy = (1.0, 0.6)
+
+    fsm.step(PiSim().pose(), {}, AlwaysFailPi())
+
+    assert fsm.category == "toy"
+    assert fsm.manual_mode is True
+
+
+def test_예전_경로는_전체_초기화를_안_한다(monkeypatch):
+    """VLA_GRASP_ONLY 를 끄면 상한을 세야 하므로 카운터가 살아 있어야 한다."""
+    monkeypatch.setattr(mcfg, "VLA_GRASP_ONLY", False)
+    fsm = _fsm_in_grasp()
+    fsm.dest_box_name = "chess"
+
+    fsm.step(PiSim().pose(), {}, AlwaysFailPi())
+
+    assert fsm._grasp_fail_tries == 1
