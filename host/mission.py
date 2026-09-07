@@ -34,6 +34,7 @@ import mission_config as mcfg
 sys.path.insert(0, str(Path(__file__).parent / "aruco"))
 
 import config as cfg
+from drive_stall import DriveStallWatch
 from localizer import Pose, box_pose
 import basket_target
 from navigator import GridPathPlanner, DriveCommand, DriveMode, DriveSequencer
@@ -443,6 +444,13 @@ class MissionFSM:
         # NUDGE_BOX 참고).
         self._nudge_best_pi_error: Optional[float] = None
         self._nudge_stall_at = 0.0
+        # ⚠️ 이 차량에는 바퀴가 실제로 도는지 아는 수단이 없다 —
+        # /odom_raw 는 cmd_vel 을 적분해 되돌려줄 뿐이고 엔코더 피드백이
+        # 없다(base_liveness 의 "못 하는 일" 참고). 탑뷰가 유일한 실측이라
+        # 여기서 본다. 판정만 하고 아무것도 안 멈춘다 — 명령이 안 닿는
+        # 상황이라 소프트웨어로는 세울 수 없다.
+        self._drive_stall = DriveStallWatch()
+        self._drive_stall_warned = False
         self._nudge_stall_warned = False
         # 바구니 앞 폐루프가 지금까지 쓴 총 이동량 — 예산 한계선용.
         self._basket_creep_used = 0.0
@@ -886,6 +894,28 @@ class MissionFSM:
             return self.state
 
         self._last_good_pose = pose
+
+        # ── 명령은 나가는데 차가 안 움직이는가 ────────────────────────────
+        #
+        # 직전 사이클에 보낸 명령과 지금 포즈를 짝짓는다. 탑뷰가 이 차량에서
+        # 바퀴 회전을 아는 **유일한 실측**이다(drive_stall 모듈 주석).
+        #
+        # 멈추지 않는다 — 명령이 안 닿는 상황이라 소프트웨어로는 못 세우고,
+        # 미션을 접어도 차가 서지 않는다. 할 수 있는 건 사람을 부르는 것뿐이다.
+        held = self._drive_stall.update(
+            time.monotonic(), self.last_cmd, pose.ok, pose.x, pose.y, pose.yaw_deg)
+        if held is None:
+            self._drive_stall_warned = False
+        elif not self._drive_stall_warned:
+            self._drive_stall_warned = True
+            bar = "=" * 64
+            print(
+                f"\n{bar}\n"
+                f"🚨 구동 정체 [{self.state.name}] '{self.last_cmd}' 를 "
+                f"{held:.0f}초째 보내는데 차가 안 움직입니다\n"
+                f"   탑뷰 기준으로 사실상 제자리입니다.\n"
+                f"   소프트웨어는 정상입니다 — 바퀴·모터 전원·물리적 걸림을 보세요.\n"
+                f"{bar}", flush=True)
 
         if self._back_requested:
             self._back_requested = False
