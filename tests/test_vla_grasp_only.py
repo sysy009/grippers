@@ -166,3 +166,35 @@ def test_끄면_예전_사다리가_그대로_살아난다(monkeypatch):
     fsm.step(link.pose(), {}, link)
 
     assert fsm._grasp_fail_tries == 1, "꺼져 있으면 카운터가 살아 있어야 한다"
+
+
+def test_어떤_재시도_카운터도_안_움직인다():
+    """⚠️ "재시도 시퀀스가 확실히 없어졌나"에 대한 답을 기계가 지키게 한다.
+
+    mission.py 에서 카운터를 올리거나 강제를 켜는 자리는 일곱 군데다
+    (_grasp_fail_tries / _replan_tries / _forcing_grasp / _forced_grasp_tries
+    / _align_tries / _reaim_tries). 하나라도 움직이면 사다리의 어느 갈래가
+    아직 살아 있다는 뜻이다.
+
+    보정을 계속 보내는 Pi 와 계속 실패하는 Pi 양쪽으로 돌려 본다 — 사다리의
+    입구가 그 둘이다."""
+    for link_cls in (AlwaysCorrectPi, AlwaysFailPi):
+        fsm = _fsm_in_grasp()
+        link = link_cls()
+        for _ in range(40):
+            fsm.step(link.pose(), _ROOK_VISIBLE, link)
+            if fsm.state == State.GRASP:
+                continue
+            fsm.state = State.GRASP        # 리셋돼도 다시 밀어 넣어 계속 두드린다
+            fsm.target_label = "rook"
+            fsm._target_xy = (1.0, 0.6)
+        counters = {
+            "_grasp_fail_tries": fsm._grasp_fail_tries,
+            "_replan_tries": fsm._replan_tries,
+            "_forced_grasp_tries": fsm._forced_grasp_tries,
+            "_align_tries": fsm._align_tries,
+            "_reaim_tries": fsm._reaim_tries,
+        }
+        assert all(v == 0 for v in counters.values()), f"{link_cls.__name__}: {counters}"
+        assert fsm._forcing_grasp is False
+        assert fsm.skipped == []
