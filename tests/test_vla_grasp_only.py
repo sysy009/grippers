@@ -94,7 +94,6 @@ def test_실패하면_상태를_리셋하고_SEARCH_TARGET_부터_다시():
     assert fsm.state == State.SEARCH_TARGET
     assert fsm.target_label is None
     assert fsm._target_xy is None
-    assert fsm._grasp_yaw_latched is None
     assert fsm._forcing_grasp is False
 
 
@@ -270,3 +269,27 @@ def test_예전_경로는_전체_초기화를_안_한다(monkeypatch):
     fsm.step(PiSim().pose(), {}, AlwaysFailPi())
 
     assert fsm._grasp_fail_tries == 1
+
+
+# ── servo 1 조준은 안 한다 (2026-09-07 사용자 지시) ───────────────────────
+
+
+def test_GRASP_명령에_조준각을_안_싣는다():
+    """Host 가 지향오차를 계산해 실어 보내면 Pi 가 servo 1 로 흡수하던
+    경로였다. Pi 쪽을 먼저 지웠고 여기까지 지워야 화면의 "servo 1 조준각"
+    줄이 사라진다.
+
+    ⚠️ INSERT/PLACE 의 yaw_correction_deg 는 그대로다 — 바구니 정면
+    지향오차라 근거도 검증 이력도 다른 값이다."""
+    import inspect
+
+    from host.mission import MissionFSM
+
+    source = inspect.getsource(MissionFSM)
+    code = chr(10).join(line for line in source.splitlines()
+                        if not line.strip().startswith("#"))
+
+    assert "_grasp_yaw_latched" not in code
+    # 트림을 **쓰는** 형태만 본다 — docstring 에는 왜 안 쓰는지가 남아야 한다.
+    assert "mcfg.PIECE_AIM_YAW_TRIM_DEG" not in code
+    assert "조준각" not in code

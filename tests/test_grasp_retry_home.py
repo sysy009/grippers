@@ -123,7 +123,6 @@ def test_상한_전_실패는_상태를_리셋하고_처음부터_다시_찾는�
     assert fsm._grasp_fail_tries == 1
     # 나머지는 초기화된다.
     assert fsm.target_label is None
-    assert fsm._grasp_yaw_latched is None
     assert fsm._forcing_grasp is False
     # 아직 포기가 아니므로 skipped 에 넣지 않는다 — 넣으면 SEARCH_TARGET 이
     # 같은 기물을 다시 못 고른다.

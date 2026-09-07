@@ -371,9 +371,6 @@ class MissionFSM:
         self.state = State.SEARCH_TARGET
         self.target_label: Optional[str] = None
         self._target_xy: Optional[XY] = None
-        # GRASP 진입 순간에 한 번 재서 붙들어 두는 servo 1 조준각(도).
-        # None 이면 아직 안 쟀다는 뜻 — 다음 GRASP 사이클에서 잰다.
-        self._grasp_yaw_latched: Optional[float] = None
         self.dest_xy: Optional[XY] = None
         # 지금 dest_xy가 어느 상자를 향한 것인지(config.BOXES의 키) — 상자가
         # 아니라 사용자에게 직접 가져다주는 경우("가져와")는 None이다.
@@ -516,7 +513,6 @@ class MissionFSM:
         # 초기화가 카운터를 0 으로 되돌려 **무한 재시도**가 된다
         # (2026-09-06, 테스트가 잡았다: "실패 1회"만 영원히 반복).
         self._grasp_fail_for: Optional[tuple[str, XY]] = None
-        self._grasp_yaw_latched = None
         # 재정렬/파지를 다 쓰고도 못 집은 기물 좌표. 다른 후보가 남아 있는
         # 동안은 SEARCH_TARGET 후보에서 뺀다 — 단 그것 말고 후보가 하나도
         # 없어지면 다시 후보로 본다(_nearest_piece/_find_label 의 2단계
@@ -598,9 +594,13 @@ class MissionFSM:
         # 더 돌아야 하는데, 필요한 정밀도(6도)가 회전 granularity(10도)보다
         # 작아서 앉지를 못한다.
         #
-        # 이제 트림은 servo 1 이 흡수한다 — GRASP 가 보내는 yaw_correction_deg
-        # 에 더한다(아래 그 자리 참고). 고정 오차를 미세 액추에이터로 지우는
-        # 것이 원래 맞는 배치다.
+        # 그 뒤 트림은 servo 1 이 흡수했다 — GRASP 가 보내는
+        # yaw_correction_deg 에 더했다.
+        #
+        # ⚠️ 2026-09-07: 그 servo 1 조준도 들어냈다(사용자 지시). 즉 지금
+        # **PIECE_AIM_YAW_TRIM_DEG(4.5도)는 어디에도 안 붙는다.** 차체도
+        # servo 1 도 이 고정 편향을 지우지 않으므로, 정책이 물체를 한쪽으로
+        # 치우쳐 보면 여기가 후보다. 상수는 근거와 함께 남겨 둔다.
         raw_err = desired - pose.yaw_deg
         return (raw_err + 180.0) % 360.0 - 180.0
 
@@ -692,7 +692,6 @@ class MissionFSM:
         self._replan_tries = 0
         self._replan_backoff_xy = None
         self._tight_yaw_gate = False
-        self._grasp_yaw_latched = None
         self.target_label = None
         self._target_xy = None
         self.dest_xy = None
@@ -1022,7 +1021,6 @@ class MissionFSM:
                     if not same:
                         self._grasp_fail_tries = 0
                         self._grasp_fail_for = None
-                    self._grasp_yaw_latched = None
                     self._path_planner.reset()   # 새 구간 시작
                     self._drive.reset()
                     self.ready_to_advance = False
@@ -1102,41 +1100,22 @@ class MissionFSM:
             # 차체 yaw 로는 못 좁힌다. 주행 허용오차가 12도인데(회전이
             # bang-bang 이라 정지 명령 뒤 관성으로 약 10도를 더 돌아서
             # 그보다 좁히면 헌팅이 난다 — DRIVE_YAW_TOLERANCE_DEG 주석),
-            # 그리퍼-기물 0.20m 에서 12도면 좌우 42mm 다. VLA 허용치
-            # (±41mm)를 이미 넘는다.
+            # ⚠️ 2026-09-07 사용자 지시로 **servo 1 조준을 통째로 들어냈다.**
             #
-            # 그래서 남은 지향 오차를 그대로 실어 보내고 Pi 가 servo 1 로
-            # 흡수한다 — 바구니 투하(PLACE)가 이미 같은 필드로 하는 것과
-            # 같은 방식이다. 부호 뒤집기와 한계 판정은 Pi 쪽에 있다
-            # (baseline_mission._grasp_vla).
+            # 여기서 남은 지향 오차에 PIECE_AIM_YAW_TRIM_DEG 를 더해
+            # yaw_correction_deg 로 실어 보내면 Pi 가 servo 1 로 흡수하던
+            # 경로였다. Pi 쪽(baseline_mission._grasp_vla)에서 먼저 지웠고,
+            # 여기까지 지워야 화면의 "servo 1 조준각" 줄이 사라진다.
             #
-            # ⚠️ 2026-09-06 밤에 **한 번만 재서 붙들도록** 바꿨다. 원래는
-            # 바구니 쪽을 따라 매 사이클 새로 계산했는데, 파지에서는 그게
-            # 독이었다 — 팔이 뻗으면 탑뷰 마커가 가려져 포즈가 27cm 씩
-            # 흔들린다(2026-09-06 실기: cmd=stop 인데 y 가 0.64 -> 0.92 ->
-            # 0.64). 그 위에서 매번 다시 재면 조준각이 계속 바뀌고, 사용자가
-            # 본 "미세하게 바뀌는 1번 모터"가 된다.
+            # 근거는 Pi 쪽 주석과 같다: 정책이 안 시킨 팔 동작인데 크기가
+            # 정책을 압도했고(정책 pan 출력 폭 0.7도 vs 보정 ±8도), 부호
+            # 규약이 GRASP 경로에서 한 번도 실기로 검증된 적이 없다.
             #
-            # 진입 순간(팔이 접혀 있어 마커가 깨끗한 시점)에 한 번 재서
-            # 파지가 끝날 때까지 그 값을 쓴다. 실패로 재시도할 때는 래치를
-            # 풀어 다시 잰다 — 그때는 기물 지도도 갱신돼 있다.
-            # _yaw_error_to_target_deg 를 쓴다 — 그 함수가 PIECE_AIM_YAW_
-            # TRIM_DEG 를 더하는 **유일한 지점**이고(그 docstring 참고),
-            # 여기서 따로 계산하면 겨눔과 보정이 서로 다른 오차를 보게 된다.
-            # ⚠️ 여기에 PIECE_AIM_YAW_TRIM_DEG 를 더한다. 그 트림은
-            # 그리퍼·마커의 고정 장착 오차라 차체가 아니라 servo 1 이
-            # 흡수해야 한다(_yaw_error_to_target_deg 의 2026-09-06 주석).
-            if (self._grasp_yaw_latched is None
-                    and self._target_xy is not None and pose.ok):
-                self._grasp_yaw_latched = (
-                    self._yaw_error_to_target_deg(pose, robot_xy)
-                    + mcfg.PIECE_AIM_YAW_TRIM_DEG)
-                print(f"[mission] servo 1 조준각 {self._grasp_yaw_latched:+.1f}도 "
-                      f"— 이번 파지 내내 이 값으로 고정합니다", flush=True)
-            grasp_yaw_correction_deg = self._grasp_yaw_latched or 0.0
+            # ⚠️ INSERT/PLACE 의 yaw_correction_deg 는 **그대로 둔다.** 그쪽은
+            # 바구니 정면 지향오차라 근거도 검증 이력도 다른 값이다
+            # (manual_insert_probe.py 의 부호 주석 참고).
             link.send(MissionCommand("stop", status, pose.x, pose.y, pose.yaw_deg,
-                                      target_label=self.target_label,
-                                      yaw_correction_deg=grasp_yaw_correction_deg))
+                                      target_label=self.target_label))
             # poll_status() 는 한 번 물으면 그 응답을 소비한다(다시 물으면
             # IDLE) — 그래서 GRASP_DONE 을 본 뒤로는 다시 안 묻고 그 사실을
             # ready_to_advance 에 붙들어 둔다(수동 모드에서 버튼 누를 때까지
@@ -1163,12 +1142,10 @@ class MissionFSM:
                 # 사이클에도 그대로 "GRASP" 를 다시 보내고, Pi 는 파지
                 # 시퀀스 전체를 처음부터 무한 재시도한다 — mcfg.
                 # GRASP_FAIL_MAX_RETRIES 로 상한을 둔다.
-                # ⚠️ 재시도 전에 조준을 **다시 잰다.** 실패한 자세 그대로 같은
-                # 각으로 또 시도하면 같은 실패를 반복한다(사용자 지시,
-                # 2026-09-06 — "물체의 위치를 재확인하는 과정이 추가되어야").
-                # 래치를 풀면 다음 GRASP 사이클이 그때의 포즈와 기물 지도로
-                # 새로 잰다. 팔은 이미 접혀 있어 마커가 깨끗하다.
-                self._grasp_yaw_latched = None
+                # ⚠️ 여기 "재시도 전에 조준을 다시 잰다(래치를 푼다)"가 있었다.
+                # 2026-09-07 에 servo 1 조준 자체를 들어내면서 같이 지웠다 —
+                # 다시 잴 조준이 없다. 실패한 자세에서 그대로 또 하지 않는
+                # 것은 아래 전체 리셋이 대신한다(기물 지도부터 다시 본다).
                 self._grasp_fail_tries += 1
                 self._grasp_fail_for = (self.target_label, self._target_xy)
                 print(f"[mission] {self.target_label} 파지 실패 "
