@@ -488,6 +488,7 @@ class MissionFSM:
         # 최소 한 번은 더 있어야 다시 강제한다 — 안 그러면 실패 직후 바로
         # 또 강제해서 GRASP_FORCE_MAX_ATTEMPTS 를 순식간에 다 쓴다).
         self._forcing_grasp = False
+        self._grasp_yaw_latched = None
         self._forced_grasp_tries = 0
         self._align_tries_at_last_force: Optional[int] = None
         # 오버헤드 재계획(GRASP_REPLAN, 2026-09-02) 용 — GRASP_ALIGN 을
@@ -513,6 +514,11 @@ class MissionFSM:
         # 초기화가 카운터를 0 으로 되돌려 **무한 재시도**가 된다
         # (2026-09-06, 테스트가 잡았다: "실패 1회"만 영원히 반복).
         self._grasp_fail_for: Optional[tuple[str, XY]] = None
+        # GRASP 진입 순간에 한 번 재서 붙들어 두는 servo 1 조준각(도).
+        # ⚠️ 마커가 팔에 붙어 있어(2026-09-08 실측) 보정이 곧 다음
+        # 사이클의 θ 를 바꾼다 — 매번 다시 재면 되먹임이 된다.
+        # None 이면 아직 안 쟀다는 뜻이다.
+        self._grasp_yaw_latched: Optional[float] = None
         # 재정렬/파지를 다 쓰고도 못 집은 기물 좌표. 다른 후보가 남아 있는
         # 동안은 SEARCH_TARGET 후보에서 뺀다 — 단 그것 말고 후보가 하나도
         # 없어지면 다시 후보로 본다(_nearest_piece/_find_label 의 2단계
@@ -691,6 +697,7 @@ class MissionFSM:
         self._forced_grasp_tries = 0
         self._replan_tries = 0
         self._replan_backoff_xy = None
+        self._grasp_yaw_latched = None
         self._tight_yaw_gate = False
         self.target_label = None
         self._target_xy = None
@@ -1021,6 +1028,7 @@ class MissionFSM:
                     if not same:
                         self._grasp_fail_tries = 0
                         self._grasp_fail_for = None
+                        self._grasp_yaw_latched = None
                     self._path_planner.reset()   # 새 구간 시작
                     self._drive.reset()
                     self.ready_to_advance = False
@@ -1095,27 +1103,60 @@ class MissionFSM:
             # grippers 저장소 MissionState.GRASP_FORCE 참고). 성공/실패
             # 판정 자체는 Pi 의 기존 두 신호(부하값+뎁스캠 확인) 그대로다.
             status = "GRASP_FORCE" if self._forcing_grasp else "GRASP"
-            # ── 좌우 조준을 servo 1 에 맡긴다 (사용자 지시, 2026-09-06) ──
+            # ── 좌우 조준을 servo 1 에 맡긴다 ────────────────────────────
+            #
+            # 2026-09-07 에 통째로 들어냈다가 2026-09-08 에 **부호를 실측으로
+            # 확정하고** 되살렸다. 사용자 지시:
+            #
+            #   "탑뷰카메라 기준으로 로봇 아루코마커와 기물의 좌표가
+            #    일직선상에 위치하게 1번 서보모터에 yaw 값을 주고 싶다"
+            #
+            # ── 왜 servo 1 인가 ──
             #
             # 차체 yaw 로는 못 좁힌다. 주행 허용오차가 12도인데(회전이
-            # bang-bang 이라 정지 명령 뒤 관성으로 약 10도를 더 돌아서
-            # 그보다 좁히면 헌팅이 난다 — DRIVE_YAW_TOLERANCE_DEG 주석),
-            # ⚠️ 2026-09-07 사용자 지시로 **servo 1 조준을 통째로 들어냈다.**
+            # bang-bang 이라 정지 뒤 관성으로 약 10도를 더 돈다), 그리퍼-기물
+            # 0.32m 에서 12도면 좌우 67mm 다.
             #
-            # 여기서 남은 지향 오차에 PIECE_AIM_YAW_TRIM_DEG 를 더해
-            # yaw_correction_deg 로 실어 보내면 Pi 가 servo 1 로 흡수하던
-            # 경로였다. Pi 쪽(baseline_mission._grasp_vla)에서 먼저 지웠고,
-            # 여기까지 지워야 화면의 "servo 1 조준각" 줄이 사라진다.
+            # ── 2026-09-08 실측: 마커가 팔에 붙어 있다 ──
             #
-            # 근거는 Pi 쪽 주석과 같다: 정책이 안 시킨 팔 동작인데 크기가
-            # 정책을 압도했고(정책 pan 출력 폭 0.7도 vs 보정 ±8도), 부호
-            # 규약이 GRASP 경로에서 한 번도 실기로 검증된 적이 없다.
+            # servo 1 을 -12~+12도 스윕하며 탑뷰를 읽었다:
             #
-            # ⚠️ INSERT/PLACE 의 yaw_correction_deg 는 **그대로 둔다.** 그쪽은
-            # 바구니 정면 지향오차라 근거도 검증 이력도 다른 값이다
-            # (manual_insert_probe.py 의 부호 주석 참고).
+            #     yaw = -0.975 * servo1 + 8.65도
+            #     잔차 RMS 0.18도,  위치 산포 x 2.2mm / y 6.7mm
+            #
+            # 위치는 제자리인데 yaw 만 1:1 로 돈다 — 마커가 servo 1 회전축
+            # 위에 있다는 뜻이다. 그래서 그리퍼와 마커는 같은 회전부에 있고
+            # 둘 사이 각도는 고정이다.
+            #
+            # θ = B - marker_yaw 이고 marker_yaw 는 servo1 에 -1 로 붙으므로
+            # dθ/d(servo1) = +1 이다. 즉 θ 를 지우려면 servo 1 을 **-θ** 만큼
+            # 돌린다 — Pi 가 여태 가정만 하던 `-yaw_correction_deg` 가 맞았다.
+            #
+            # ── 반드시 한 번만 재서 붙든다 ──
+            #
+            # ⚠️ 마커가 팔을 따라 도니 **보정이 곧 다음 사이클의 θ 를 바꾼다.**
+            # 매 사이클 다시 재면 보정이 자기 꼬리를 무는 되먹임이 된다.
+            # GRASP 진입 순간(팔이 아직 안 움직인 시점)에 한 번 재서 파지가
+            # 끝날 때까지 그 값을 쓴다. 실패로 재시도할 때는 래치를 푼다.
+            #
+            # 2026-09-06 에도 같은 래치가 있었는데 그때 이유는 달랐다(팔이
+            # 뻗으면 마커가 가려져 포즈가 흔들린다). 지금은 이유가 하나 더
+            # 늘었고 더 강해졌다.
+            #
+            # ⚠️ 트림은 안 더한다. PIECE_AIM_YAW_TRIM_DEG 는 차체 조준 시절의
+            # 눈대중 값이고, 지금 필요한 상수는 "마커 정면과 그리퍼 방향의
+            # 고정 각도"(b)라 성격이 다르다. b 는 Pi 쪽 상수로 두고 실기에서
+            # 잡는다 — 여기서는 **순수 기하**만 보낸다.
+            if (self._grasp_yaw_latched is None
+                    and self._target_xy is not None and pose.ok):
+                self._grasp_yaw_latched = self._yaw_error_to_target_deg(pose, robot_xy)
+                print(f"[mission] servo 1 조준각 "
+                      f"{self._grasp_yaw_latched:+.1f}도 — 이번 파지 내내 "
+                      f"이 값으로 고정합니다", flush=True)
+            grasp_yaw_correction_deg = self._grasp_yaw_latched or 0.0
             link.send(MissionCommand("stop", status, pose.x, pose.y, pose.yaw_deg,
-                                      target_label=self.target_label))
+                                      target_label=self.target_label,
+                                      yaw_correction_deg=grasp_yaw_correction_deg))
             # poll_status() 는 한 번 물으면 그 응답을 소비한다(다시 물으면
             # IDLE) — 그래서 GRASP_DONE 을 본 뒤로는 다시 안 묻고 그 사실을
             # ready_to_advance 에 붙들어 둔다(수동 모드에서 버튼 누를 때까지
@@ -1132,6 +1173,7 @@ class MissionFSM:
                 # — 사용자 지시: 실패하면 재정렬 후 재시도, 그래도 안
                 # 되면 포기.
                 self._forcing_grasp = False
+                self._grasp_yaw_latched = None
                 print(f"[mission] {self.target_label} 강제 파지 "
                       f"{self._forced_grasp_tries}/{mcfg.GRASP_FORCE_MAX_ATTEMPTS}회 실패 "
                       f"— 재정렬 후 재시도합니다")

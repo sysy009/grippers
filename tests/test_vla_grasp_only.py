@@ -274,13 +274,18 @@ def test_예전_경로는_전체_초기화를_안_한다(monkeypatch):
 # ── servo 1 조준은 안 한다 (2026-09-07 사용자 지시) ───────────────────────
 
 
-def test_GRASP_명령에_조준각을_안_싣는다():
-    """Host 가 지향오차를 계산해 실어 보내면 Pi 가 servo 1 로 흡수하던
-    경로였다. Pi 쪽을 먼저 지웠고 여기까지 지워야 화면의 "servo 1 조준각"
-    줄이 사라진다.
+def test_GRASP_조준각은_한_번만_재서_붙든다():
+    """⚠️ 2026-09-08 실측: 마커가 servo 1 회전축 위에 붙어 있다.
 
-    ⚠️ INSERT/PLACE 의 yaw_correction_deg 는 그대로다 — 바구니 정면
-    지향오차라 근거도 검증 이력도 다른 값이다."""
+        yaw = -0.975 * servo1 + 8.65도   (잔차 RMS 0.18도, 위치는 제자리)
+
+    그래서 **보정이 곧 다음 사이클의 θ 를 바꾼다.** 매 사이클 다시 재면
+    보정이 자기 꼬리를 무는 되먹임이 된다 — GRASP 진입 때 한 번 재서
+    파지가 끝날 때까지 그 값을 쓴다.
+
+    ⚠️ 트림(PIECE_AIM_YAW_TRIM_DEG)은 더하지 않는다. 그건 차체 조준 시절의
+    눈대중 값이고, 지금 필요한 상수(마커 정면과 그리퍼 방향의 고정 각도)는
+    성격이 다르다 — Pi 쪽에서 잡는다. 여기서는 순수 기하만 보낸다."""
     import inspect
 
     from host.mission import MissionFSM
@@ -289,7 +294,9 @@ def test_GRASP_명령에_조준각을_안_싣는다():
     code = chr(10).join(line for line in source.splitlines()
                         if not line.strip().startswith("#"))
 
-    assert "_grasp_yaw_latched" not in code
-    # 트림을 **쓰는** 형태만 본다 — docstring 에는 왜 안 쓰는지가 남아야 한다.
+    # 한 번만 재는 구조 — 래치가 비어 있을 때만 계산한다.
+    assert "if (self._grasp_yaw_latched is None" in code
+    # 순수 기하만. 트림을 더하면 이 시험이 잡는다.
     assert "mcfg.PIECE_AIM_YAW_TRIM_DEG" not in code
-    assert "조준각" not in code
+    # 실패로 재시도할 때는 다시 잰다.
+    assert code.count("self._grasp_yaw_latched = None") >= 3
