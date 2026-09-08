@@ -508,6 +508,8 @@ class MissionFSM:
         # (mcfg.GRASP_FAIL_MAX_RETRIES, 2026-09-01 사용자 지시). GRASP_BLOCKED
         # 는 위 align_tries/forcing 쪽이 이미 상한을 관리하므로 겹치지 않는다.
         self._grasp_fail_tries = 0
+        # 하한(GRASP_MIN_DIST_M)에 걸려 물러난 횟수. 대상이 바뀌면 0 이다.
+        self._too_close_backoffs = 0
         # 그 카운터가 **어느 대상** 것인지. 파지 실패 재시도가 상태를 통째로
         # 리셋하면서 target_label 을 지우기 때문에, 라벨만으로는 "새 대상"과
         # "같은 대상 재시도"를 구분할 수 없다 — 구분 못 하면 대상 선택 시점의
@@ -1029,6 +1031,10 @@ class MissionFSM:
                         self._grasp_fail_tries = 0
                         self._grasp_fail_for = None
                         self._grasp_yaw_latched = None
+                        # 후진 상한도 같은 자리에서 지운다 — 같은 기물을 다시
+                        # 고르는 경로에서 지우면 상한이 영영 안 차서 앞뒤로만
+                        # 오가게 된다(바로 위 주석과 같은 이유).
+                        self._too_close_backoffs = 0
                     self._path_planner.reset()   # 새 구간 시작
                     self._drive.reset()
                     self.ready_to_advance = False
@@ -1039,6 +1045,34 @@ class MissionFSM:
             dist = math.hypot(self._target_xy[0] - robot_xy[0],
                               self._target_xy[1] - robot_xy[1])
             if dist <= mcfg.GRASP_TRIGGER_DIST_M:
+                # ── 너무 가까우면 물러난다 (2026-09-08 사용자 지시) ────────
+                #
+                # 그전에는 이 게이트가 단방향이라 20cm 에 서 있어도 그대로
+                # 파지로 넘어갔다. 좌우에는 ±41mm 창이 있는데
+                # (grasp_alignment.VLA_PAN_LIMIT_DEG) 전후에는 없었다.
+                #
+                # ⚠️ 상한을 같이 둔다. 하한과 게이트 사이가 1cm 뿐이라,
+                # 물러났다가 다시 접근하면 같은 오버슈트로 또 걸릴 수 있다.
+                # 그대로 두면 앞뒤로만 오가며 시연이 멎는다.
+                if dist < mcfg.GRASP_MIN_DIST_M:
+                    if (self._too_close_backoffs
+                            < mcfg.GRASP_TOO_CLOSE_MAX_BACKOFFS):
+                        self._too_close_backoffs += 1
+                        self.ready_to_advance = False
+                        self.last_cmd = "back"
+                        print(f"[mission] {self.target_label} 너무 가깝다 "
+                              f"{dist:.3f}m < {mcfg.GRASP_MIN_DIST_M:.2f}m — "
+                              f"물러난다 ({self._too_close_backoffs}/"
+                              f"{mcfg.GRASP_TOO_CLOSE_MAX_BACKOFFS})", flush=True)
+                        link.send(MissionCommand(
+                            "back", "APPROACH_PIECE", pose.x, pose.y,
+                            pose.yaw_deg, target_label=self.target_label))
+                        return self.state
+                    # 상한까지 썼다 — 가까운 채로 집는 편이 앞뒤로 오가며
+                    # 멎는 것보다 낫다. 정책이 실패해도 다음 사이클이 온다.
+                    print(f"[mission] {self.target_label} 여전히 가깝다 "
+                          f"{dist:.3f}m — 후진 상한을 다 써서 그대로 집는다",
+                          flush=True)
                 if not self._facing_target(pose, robot_xy):
                     # 트리거 거리 안이어도 정면이 아니면 아직 GRASP 로 안
                     # 넘어간다 — 제자리에서 겨눈다.

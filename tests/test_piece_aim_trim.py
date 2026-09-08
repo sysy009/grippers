@@ -103,7 +103,7 @@ def test_tight_yaw_gate_없이도_평소_접근이_안_맞으면_바로_GRASP로
 
     # 트리거 거리 안이지만 목표를 정면으로 보고 있지 않다(옆을 보고 있다).
     link = PiSim(x=_TARGET_XY[0],
-                y=_TARGET_XY[1] - mcfg.GRASP_TRIGGER_DIST_M / 2,
+                y=_TARGET_XY[1] - (mcfg.GRASP_MIN_DIST_M + 0.005),  # 창 안: 하한과 게이트 사이
                 yaw_deg=90.0 + 45.0)
 
     fsm.step(link.pose(), {}, link)
